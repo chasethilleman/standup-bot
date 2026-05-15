@@ -19,17 +19,27 @@ Rules:
 - "Tomorrow" section: future tense. Infer from in-progress items, uncommitted changes, and context.
 - If an item is still in progress, include the progress made under "Today" and the continuation under "Tomorrow".
 - Explicitly include PR reviews in "Today" when present.
+- PRs tagged "ready for review" or "ready to merge" are finished work for "Today", not "Tomorrow".
 - Any ticket moved to "In Progress" today MUST appear in both sections.
 - For in-progress tickets, include concrete progress details from related commits, PR activity, or uncommitted changes when available.
 - Prefer plain-English functionality summaries over file names, counts, or low-level code terminology.
 - Do NOT directly quote Slack messages — summarize the topics discussed instead
-- Keep each bullet point to one line
 - Use markdown bullet points (-)
+- If there are fewer than 5 major items in "Today", expand each item with indented sub-bullets \
+that describe specific features, functionalities, and changes worked on in more detail. \
+Pull details from commit messages, PR descriptions, file changes, and ticket context. \
+Each sub-bullet should describe a distinct piece of work (e.g., a specific fix, a new page added, \
+a rendering improvement). Do NOT pad with vague filler — only add sub-bullets when there are \
+real details available.
+- If there are 5 or more major items, keep each bullet point to one line without sub-bullets.
 
-Format your response EXACTLY like this:
+Format your response EXACTLY like this (sub-bullets only when fewer than 5 major items):
 ## Today
 - Item 1
+  - Detail about a specific feature or change
+  - Detail about another aspect of the work
 - Item 2
+  - Detail
 
 ## Tomorrow
 - Item 1
@@ -86,7 +96,9 @@ def build_user_prompt(activities) -> str:
             lines = [f"### GitHub {label}"]
             for a in prs:
                 repo = a.repository.split("/")[-1] if a.repository else ""
-                lines.append(f"- [{repo}] {a.title} ({a.url})")
+                pr_labels = get_ready_labels(a)
+                tag = f" [{', '.join(sorted(pr_labels))}]" if pr_labels else ""
+                lines.append(f"- [{repo}] {a.title}{tag} ({a.url})")
             sections.append("\n".join(lines))
 
     # Linear tickets
@@ -150,6 +162,8 @@ def summarize(activities) -> dict:
         activities,
     )
     today, tomorrow = enforce_local_wip_overlap(today, tomorrow, activities)
+    today = enforce_reviewed_prs_today(today, activities)
+    today, tomorrow = enforce_ready_tagged_prs_finished(today, tomorrow, activities)
     tomorrow = enforce_grounded_tomorrow(tomorrow, activities)
 
     return {
@@ -570,3 +584,138 @@ def extract_ticket_ids(text: str) -> set[str]:
     if not text:
         return set()
     return {match.upper() for match in re.findall(r"\b[A-Z]+-\d+\b", text, re.IGNORECASE)}
+
+
+def enforce_reviewed_prs_today(today: str, activities) -> str:
+    reviewed = [
+        a
+        for a in activities
+        if a.source == "github" and a.activity_type == "pr_reviewed"
+    ]
+    if not reviewed:
+        return today
+
+    lines = [line for line in today.splitlines() if line.strip()]
+    existing = [line.lower() for line in lines if line.lstrip().startswith("-")]
+    seen = set()
+
+    for activity in sorted(reviewed, key=lambda a: a.occurred_at):
+        title = (activity.title or "").strip()
+        cleaned_title = re.sub(r"^\s*Reviewed:\s*", "", title, flags=re.IGNORECASE).strip()
+        normalized_title = cleaned_title.lower()
+        repo = activity.repository.split("/")[-1] if activity.repository else "repo"
+        dedupe_key = (repo.lower(), normalized_title)
+        if dedupe_key in seen:
+            continue
+
+        ticket_ids = extract_ticket_ids(cleaned_title)
+        already_present = normalized_title and any(normalized_title in line for line in existing)
+        if not already_present and ticket_ids:
+            already_present = any(
+                any(ticket_id.lower() in line for ticket_id in ticket_ids) and "review" in line
+                for line in existing
+            )
+        if already_present:
+            seen.add(dedupe_key)
+            continue
+
+        ticket_prefix = f"{sorted(ticket_ids)[0]}: " if ticket_ids else ""
+        bullet = f"- Reviewed PR in {repo} — {ticket_prefix}{cleaned_title}"
+        lines.append(bullet)
+        existing.append(bullet.lower())
+        seen.add(dedupe_key)
+
+    return "\n".join(lines).strip()
+
+
+def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities) -> tuple[str, str]:
+    ready_prs = [a for a in activities if is_ready_tagged_pr(a)]
+    if not ready_prs:
+        return today, tomorrow
+
+    today_lines = [line for line in today.splitlines() if line.strip()]
+    today_blob = today.lower()
+    seen_finished = set()
+    finished_markers = set()
+
+    for activity in sorted(ready_prs, key=lambda a: a.occurred_at):
+        cleaned_title = re.sub(r"^\s*Reviewed:\s*", "", (activity.title or "").strip(), flags=re.IGNORECASE)
+        normalized_title = cleaned_title.lower()
+        dedupe_key = (activity.repository or "", normalized_title)
+        if dedupe_key in seen_finished:
+            continue
+
+        ticket_ids = extract_ticket_ids(cleaned_title)
+        labels = ", ".join(sorted(get_ready_labels(activity)))
+
+        if normalized_title and normalized_title not in today_blob:
+            repo = activity.repository.split("/")[-1] if activity.repository else "repo"
+            prefix = f"{sorted(ticket_ids)[0]}: " if ticket_ids else ""
+            today_lines.append(f"- Finished PR in {repo} — {prefix}{cleaned_title} ({labels})")
+            seen_finished.add(dedupe_key)
+
+        if normalized_title:
+            finished_markers.add(normalized_title)
+        for ticket_id in ticket_ids:
+            finished_markers.add(ticket_id.lower())
+
+    # Rewrite existing today bullets that reference finished tickets
+    today_lines = [
+        rewrite_as_finished(line) if line.lstrip().startswith("-") and any(
+            marker in line.lower() for marker in finished_markers
+        ) else line
+        for line in today_lines
+    ]
+
+    tomorrow_lines = [line for line in tomorrow.splitlines() if line.strip()]
+    filtered_tomorrow = []
+    for line in tomorrow_lines:
+        if not line.lstrip().startswith("-"):
+            filtered_tomorrow.append(line)
+            continue
+
+        lower_line = line.lower()
+        if any(marker in lower_line for marker in finished_markers):
+            continue
+        filtered_tomorrow.append(line)
+
+    return "\n".join(today_lines).strip(), "\n".join(filtered_tomorrow).strip()
+
+
+def rewrite_as_finished(line: str) -> str:
+    result = re.sub(r"\bStarted\b", "Finished", line)
+    result = re.sub(r"\bstarted\b", "finished", result)
+    result = re.sub(r"\bBegan\b", "Finished", result)
+    result = re.sub(r"\bbegan\b", "finished", result)
+    result = re.sub(
+        r"Moved to In Progress and (?:advanced|progressed) (?:the|this) work(?: today)?",
+        "Completed this work",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"Moved to In Progress",
+        "Completed",
+        result,
+        flags=re.IGNORECASE,
+    )
+    return result
+
+
+def is_ready_tagged_pr(activity) -> bool:
+    if activity.source != "github" or activity.activity_type not in {"pr_opened", "pr_reviewed", "pr_merged", "pr_ready"}:
+        return False
+
+    labels = get_ready_labels(activity)
+    if labels:
+        return True
+
+    text = " ".join([activity.title or "", activity.description or ""]).lower()
+    return "ready for review" in text or "ready to merge" in text
+
+
+def get_ready_labels(activity) -> set[str]:
+    metadata = getattr(activity, "metadata", {}) or {}
+    labels = metadata.get("labels", []) if isinstance(metadata, dict) else []
+    normalized = {str(label).strip().lower() for label in labels if str(label).strip()}
+    return {l for l in normalized if l in {"ready for review", "ready to merge"}}
