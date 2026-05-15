@@ -60,6 +60,7 @@ def generate_standup(
     target_date: date,
     skip_sync: bool = False,
     raw_only: bool = False,
+    extra_context: str = "",
 ) -> Standup | list[Activity]:
     since, until = get_sync_range(target_date)
 
@@ -71,7 +72,7 @@ def generate_standup(
     if raw_only:
         return activities
 
-    result = summarizer.summarize(activities)
+    result = summarizer.summarize(activities, extra_context=extra_context)
 
     standup = Standup.objects.create(
         date=target_date,

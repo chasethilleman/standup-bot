@@ -26,6 +26,16 @@ class Command(BaseCommand):
             help="Print raw activities without AI summary.",
         )
         parser.add_argument(
+            "--extra",
+            type=str,
+            help="Extra context to supplement the standup (e.g. meeting notes, commit details).",
+        )
+        parser.add_argument(
+            "--extra-file",
+            type=str,
+            help="Path to a file containing extra context to supplement the standup.",
+        )
+        parser.add_argument(
             "--verbose",
             action="store_true",
             help="Enable verbose output.",
@@ -40,6 +50,18 @@ class Command(BaseCommand):
         raw_only = options["raw"]
         skip_sync = options["no_sync"]
 
+        extra_context = options.get("extra") or ""
+        extra_file = options.get("extra_file")
+        if extra_file:
+            try:
+                with open(extra_file) as f:
+                    file_content = f.read().strip()
+                if file_content:
+                    extra_context = f"{extra_context}\n{file_content}".strip() if extra_context else file_content
+            except FileNotFoundError:
+                self.stderr.write(self.style.ERROR(f"Extra file not found: {extra_file}"))
+                return
+
         if options["verbose"]:
             import logging
             logging.basicConfig(level=logging.DEBUG)
@@ -51,6 +73,7 @@ class Command(BaseCommand):
             target_date=target_date,
             skip_sync=skip_sync,
             raw_only=raw_only,
+            extra_context=extra_context,
         )
 
         if raw_only:

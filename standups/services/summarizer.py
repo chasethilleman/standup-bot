@@ -51,7 +51,7 @@ MAX_RETRIES = 4
 INITIAL_RETRY_DELAY_SECONDS = 1.5
 
 
-def build_user_prompt(activities) -> str:
+def build_user_prompt(activities, extra_context: str = "") -> str:
     grouped = {}
     for activity in activities:
         key = f"{activity.source}_{activity.activity_type}"
@@ -133,13 +133,18 @@ def build_user_prompt(activities) -> str:
                 lines.append(f"  - {msg}")
         sections.append("\n".join(lines))
 
+    if extra_context:
+        lines = ["### Additional Context (user-provided, use as supplementary info)"]
+        lines.append(extra_context)
+        sections.append("\n".join(lines))
+
     if not sections:
         return "No activities found for this period."
 
     return "\n\n".join(sections)
 
 
-def summarize(activities) -> dict:
+def summarize(activities, extra_context: str = "") -> dict:
     if not settings.ANTHROPIC_API_KEY:
         return {
             "yesterday": "Claude API key not configured",
@@ -150,7 +155,7 @@ def summarize(activities) -> dict:
             "completion_tokens": 0,
         }
 
-    user_prompt = build_user_prompt(activities)
+    user_prompt = build_user_prompt(activities, extra_context=extra_context)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     response = request_summary_with_retries(client, user_prompt)
 
