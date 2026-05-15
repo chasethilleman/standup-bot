@@ -31,12 +31,38 @@ class LinearService(BaseIntegrationService):
             payload["variables"] = variables
 
         response = httpx.post(LINEAR_API_URL, json=payload, headers=self.get_headers(), timeout=30)
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            logger.error("Linear API returned %s: %s", response.status_code, response.text)
+            response.raise_for_status()
+
         data = response.json()
 
         if "errors" in data:
             logger.error("Linear GraphQL errors: %s", data["errors"])
         return data.get("data", {})
+
+    def fetch_issue_history(self, issue_id: str) -> dict:
+        query = """
+        query($issueId: String!) {
+            issue(id: $issueId) {
+                history(first: 20) {
+                    nodes {
+                        id
+                        createdAt
+                        fromState { name }
+                        toState { name }
+                    }
+                }
+            }
+        }
+        """
+        try:
+            data = self.graphql(query, {"issueId": issue_id})
+            return data.get("issue", {}).get("history", {})
+        except Exception:
+            logger.debug("Failed to fetch history for issue %s", issue_id)
+            return {"nodes": []}
 
     def sync(self, since: datetime, until: datetime) -> list[Activity]:
         self.load_config()
@@ -58,15 +84,16 @@ class LinearService(BaseIntegrationService):
         since_iso = since.isoformat()
         until_iso = until.isoformat()
 
+        # First query: get issues without history to stay under complexity limit
         query = """
-        query($since: DateTime!, $until: DateTime!) {
+        query($since: DateTimeOrDuration!, $until: DateTimeOrDuration!) {
             viewer {
                 assignedIssues(
                     filter: {
                         updatedAt: { gte: $since, lte: $until }
                     }
                     orderBy: updatedAt
-                    first: 100
+                    first: 50
                 ) {
                     nodes {
                         id
@@ -74,19 +101,11 @@ class LinearService(BaseIntegrationService):
                         title
                         description
                         url
-                        state { name type }
+                        state { name }
                         createdAt
                         updatedAt
                         completedAt
                         team { name key }
-                        history(first: 50) {
-                            nodes {
-                                id
-                                createdAt
-                                fromState { name type }
-                                toState { name type }
-                            }
-                        }
                     }
                 }
             }
@@ -95,6 +114,10 @@ class LinearService(BaseIntegrationService):
 
         data = self.graphql(query, {"since": since_iso, "until": until_iso})
         issues = data.get("viewer", {}).get("assignedIssues", {}).get("nodes", [])
+
+        # Fetch history per-issue to avoid complexity limits
+        for issue in issues:
+            issue["history"] = self.fetch_issue_history(issue["id"])
 
         for issue in issues:
             identifier = issue.get("identifier", "")
@@ -134,7 +157,7 @@ class LinearService(BaseIntegrationService):
                 to_state = event.get("toState", {}).get("name", "")
 
                 # Skip if we already recorded a completion for this issue
-                if event.get("toState", {}).get("type") == "completed":
+                if issue.get("completedAt") and to_state == issue.get("state", {}).get("name", ""):
                     continue
 
                 activity = self.save_activity(

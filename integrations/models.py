@@ -3,6 +3,7 @@ from django.db import models
 
 class IntegrationConfig(models.Model):
     INTEGRATION_CHOICES = [
+        ("local_git", "Local Git"),
         ("github", "GitHub"),
         ("linear", "Linear"),
         ("slack", "Slack"),
@@ -22,6 +23,7 @@ class IntegrationConfig(models.Model):
 
 class Activity(models.Model):
     SOURCE_CHOICES = [
+        ("local_git", "Local Git"),
         ("github", "GitHub"),
         ("linear", "Linear"),
         ("slack", "Slack"),

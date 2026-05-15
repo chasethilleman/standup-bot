@@ -46,8 +46,14 @@ class GitHubService(BaseIntegrationService):
                 repo_objects += list(user.get_repos(type="member", sort="pushed"))
 
             for repo in repo_objects:
-                activities.extend(self.sync_commits(repo, username, since, until))
-                activities.extend(self.sync_pull_requests(repo, username, since, until))
+                try:
+                    activities.extend(self.sync_commits(repo, username, since, until))
+                    activities.extend(self.sync_pull_requests(repo, username, since, until))
+                except Exception as e:
+                    if "451" in str(e) or "blocked" in str(e).lower():
+                        logger.debug("Skipping blocked repo %s", repo.full_name)
+                    else:
+                        logger.exception("Failed to sync repo %s", repo.full_name)
 
             self.mark_synced()
         except Exception:
@@ -76,7 +82,9 @@ class GitHubService(BaseIntegrationService):
                 )
                 if activity:
                     activities.append(activity)
-        except Exception:
+        except Exception as e:
+            if "451" in str(e) or "blocked" in str(e).lower():
+                raise
             logger.exception("Failed to sync commits for %s", repo.full_name)
         return activities
 
@@ -144,6 +152,8 @@ class GitHubService(BaseIntegrationService):
                 except Exception:
                     logger.debug("Failed to fetch reviews for PR #%s", pr.number)
 
-        except Exception:
+        except Exception as e:
+            if "451" in str(e) or "blocked" in str(e).lower():
+                raise
             logger.exception("Failed to sync PRs for %s", repo.full_name)
         return activities

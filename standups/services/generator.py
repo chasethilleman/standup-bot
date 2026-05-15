@@ -75,9 +75,8 @@ def generate_standup(
 
     standup = Standup.objects.create(
         date=target_date,
-        yesterday=result["yesterday"],
         today=result["today"],
-        blockers=result["blockers"],
+        tomorrow=result["tomorrow"],
         raw_ai_response=result["raw_response"],
         prompt_tokens=result["prompt_tokens"],
         completion_tokens=result["completion_tokens"],

@@ -5,9 +5,8 @@ from integrations.models import Activity
 
 class Standup(models.Model):
     date = models.DateField()
-    yesterday = models.TextField(blank=True, default="")
     today = models.TextField(blank=True, default="")
-    blockers = models.TextField(blank=True, default="")
+    tomorrow = models.TextField(blank=True, default="")
     raw_ai_response = models.TextField(blank=True, default="")
     activities = models.ManyToManyField(Activity, blank=True)
     prompt_tokens = models.IntegerField(default=0)
