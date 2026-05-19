@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime
 
@@ -8,6 +9,12 @@ from integrations.models import Activity
 from .base import BaseIntegrationService
 
 logger = logging.getLogger(__name__)
+
+
+def extract_ticket_from_branch(branch: str) -> str:
+    """Extract a ticket ID like ATH-1462 from branch names like lala/ATH-1462."""
+    match = re.search(r"\b([A-Z]+-\d+)\b", branch, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
 
 
 class LocalGitService(BaseIntegrationService):
@@ -105,6 +112,7 @@ class LocalGitService(BaseIntegrationService):
                 external_id=sha,
                 repository=repo_name,
                 branch=branch,
+                ticket_id=extract_ticket_from_branch(branch),
                 occurred_at=timestamp,
                 metadata={"pushed": bool(pushed), "repo_path": repo_path},
             )
@@ -165,6 +173,7 @@ class LocalGitService(BaseIntegrationService):
             external_id=f"uncommitted-{repo_name}-{branch}",
             repository=repo_name,
             branch=branch,
+            ticket_id=extract_ticket_from_branch(branch),
             occurred_at=until,
             metadata={"repo_path": repo_path},
         )

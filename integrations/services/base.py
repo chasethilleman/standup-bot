@@ -38,15 +38,27 @@ class BaseIntegrationService(ABC):
 
     def save_activity(self, **kwargs) -> Activity | None:
         try:
-            activity, created = Activity.objects.update_or_create(
-                source=kwargs["source"],
-                external_id=kwargs["external_id"],
-                activity_type=kwargs["activity_type"],
-                defaults={k: v for k, v in kwargs.items() if k not in ("source", "external_id", "activity_type")},
-            )
-            if created:
+            lookup = {
+                "source": kwargs["source"],
+                "external_id": kwargs["external_id"],
+                "activity_type": kwargs["activity_type"],
+            }
+            defaults = {k: v for k, v in kwargs.items() if k not in lookup}
+
+            try:
+                activity = Activity.objects.get(**lookup)
+                # Update metadata but preserve occurred_at — it represents
+                # when the activity originally happened and should not drift
+                # when re-synced (e.g., pr.updated_at changes on every comment).
+                for key, value in defaults.items():
+                    if key != "occurred_at":
+                        setattr(activity, key, value)
+                activity.save()
+                return activity
+            except Activity.DoesNotExist:
+                activity = Activity.objects.create(**kwargs)
                 logger.debug("Created activity: %s", activity)
-            return activity
+                return activity
         except Exception:
             logger.exception("Failed to save activity: %s", kwargs.get("title", "unknown"))
             return None

@@ -13,16 +13,28 @@ produce a daily standup summary.
 
 Rules:
 - The report has exactly two sections: "Today" (what was done today) and "Tomorrow" (planned work)
+- Each activity is tagged with its date (e.g., [May 14] or [May 15]). The target standup date \
+is provided at the top of the activity list.
+- ONLY include work from the target date in "Today". Activities from earlier dates are provided \
+for context only — do NOT list them as today's work unless they clearly continued into the target date \
+(e.g., an in-progress ticket with commits on both days).
 - Group related work together (e.g., multiple commits on the same ticket/PR = one bullet)
-- Use ticket/PR identifiers when available (e.g., "ENG-123", "PR #45")
-- "Today" section: past tense. Include ALL meaningful work completed or progressed today.
+- When a ticket ID is available, it MUST be the first thing in the bullet point \
+(e.g., "ATH-1408: Worked on guardian dashboard" not "Worked on ATH-1408 guardian dashboard"). \
+Format: "TICKET-ID: description"
+- "Today" section: past tense. Include ALL meaningful work completed or progressed on the target date.
 - "Tomorrow" section: future tense. Infer from in-progress items, uncommitted changes, and context.
 - If an item is still in progress, include the progress made under "Today" and the continuation under "Tomorrow".
-- Explicitly include PR reviews in "Today" when present.
+- Explicitly include PR reviews in "Today" when they occurred on the target date.
 - PRs tagged "ready for review" or "ready to merge" are finished work for "Today", not "Tomorrow".
-- Any ticket moved to "In Progress" today MUST appear in both sections.
+- Any ticket moved to "In Progress" on the target date MUST appear in both sections.
+- Tickets that were only moved to a terminal state like "Released" or "Done" (with no commits or \
+PRs in the same period) should be briefly noted as released/completed — do NOT describe the full \
+scope of work on those tickets. Group multiple released tickets into a single bullet when possible.
 - For in-progress tickets, include concrete progress details from related commits, PR activity, or uncommitted changes when available.
 - Prefer plain-English functionality summaries over file names, counts, or low-level code terminology.
+- Use the actual ticket or PR title as provided in the activity data. Do NOT rephrase, \
+paraphrase, or invent a new description for the ticket — use the original title verbatim.
 - Do NOT directly quote Slack messages — summarize the topics discussed instead
 - Use markdown bullet points (-)
 - If there are fewer than 5 major items in "Today", expand each item with indented sub-bullets \
@@ -35,15 +47,15 @@ real details available.
 
 Format your response EXACTLY like this (sub-bullets only when fewer than 5 major items):
 ## Today
-- Item 1
+- ATH-1234: Description of work done
   - Detail about a specific feature or change
   - Detail about another aspect of the work
-- Item 2
+- ATH-5678: Another item
   - Detail
 
 ## Tomorrow
-- Item 1
-- Item 2
+- ATH-1234: Continue remaining work
+- ATH-9999: Next planned item
 """
 
 
@@ -51,7 +63,22 @@ MAX_RETRIES = 4
 INITIAL_RETRY_DELAY_SECONDS = 1.5
 
 
-def build_user_prompt(activities, extra_context: str = "") -> str:
+def format_activity_date(activity, target_date) -> str:
+    """Return a short date tag like [May 14] for the activity's occurred_at date in local time."""
+    from standups.services.generator import activity_local_date
+    local_date = activity_local_date(activity.occurred_at)
+    return f"[{local_date.strftime('%b %-d')}]"
+
+
+def is_on_target_date(activity, target_date) -> bool:
+    """Check if an activity occurred on the target date in the user's local timezone."""
+    if target_date is None:
+        return True
+    from standups.services.generator import activity_local_date
+    return activity_local_date(activity.occurred_at) == target_date
+
+
+def build_user_prompt(activities, extra_context: str = "", target_date=None) -> str:
     grouped = {}
     for activity in activities:
         key = f"{activity.source}_{activity.activity_type}"
@@ -61,6 +88,10 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
 
     sections = []
 
+    # Header with target date context
+    if target_date:
+        sections.append(f"**Target standup date: {target_date.strftime('%B %-d, %Y')}**")
+
     # Local git commits
     for commit_type in ["local_git_commit", "local_git_local_commit"]:
         local_commits = grouped.get(commit_type, [])
@@ -68,7 +99,8 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
             label = "Local Commits (unpushed)" if "local_commit" in commit_type else "Local Commits (pushed)"
             lines = [f"### {label}"]
             for a in local_commits:
-                lines.append(f"- [{a.repository}:{a.branch}] {a.title}")
+                date_tag = format_activity_date(a, target_date) if target_date else ""
+                lines.append(f"- {date_tag} [{a.repository}:{a.branch}] {a.title}")
             sections.append("\n".join(lines))
 
     # Local uncommitted changes
@@ -76,7 +108,8 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
     if uncommitted:
         lines = ["### Work In Progress (uncommitted changes)"]
         for a in uncommitted:
-            lines.append(f"- [{a.repository}:{a.branch}] {a.title}")
+            date_tag = format_activity_date(a, target_date) if target_date else ""
+            lines.append(f"- {date_tag} [{a.repository}:{a.branch}] {a.title}")
         sections.append("\n".join(lines))
 
     # GitHub commits
@@ -85,7 +118,8 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
         lines = ["### GitHub Commits"]
         for a in commits:
             repo = a.repository.split("/")[-1] if a.repository else ""
-            lines.append(f"- [{repo}] {a.title}")
+            date_tag = format_activity_date(a, target_date) if target_date else ""
+            lines.append(f"- {date_tag} [{repo}] {a.title}")
         sections.append("\n".join(lines))
 
     # GitHub PRs
@@ -98,7 +132,8 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
                 repo = a.repository.split("/")[-1] if a.repository else ""
                 pr_labels = get_ready_labels(a)
                 tag = f" [{', '.join(sorted(pr_labels))}]" if pr_labels else ""
-                lines.append(f"- [{repo}] {a.title}{tag} ({a.url})")
+                date_tag = format_activity_date(a, target_date) if target_date else ""
+                lines.append(f"- {date_tag} [{repo}] {a.title}{tag} ({a.url})")
             sections.append("\n".join(lines))
 
     # Linear tickets
@@ -108,8 +143,14 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
             label = "Completed" if "completed" in ticket_type else "Status Changes"
             lines = [f"### Linear Tickets — {label}"]
             for a in tickets:
-                desc = f" ({a.description})" if a.description else ""
-                lines.append(f"- {a.title}{desc}")
+                if "completed" in ticket_type:
+                    # Show the terminal state, not the full issue description
+                    state = a.status or "Done"
+                    desc = f" (moved to {state})"
+                else:
+                    desc = f" ({a.description})" if a.description else ""
+                date_tag = format_activity_date(a, target_date) if target_date else ""
+                lines.append(f"- {date_tag} {a.title}{desc}")
             sections.append("\n".join(lines))
 
     # Cross-source context by ticket
@@ -144,7 +185,7 @@ def build_user_prompt(activities, extra_context: str = "") -> str:
     return "\n\n".join(sections)
 
 
-def summarize(activities, extra_context: str = "") -> dict:
+def summarize(activities, extra_context: str = "", target_date=None) -> dict:
     if not settings.ANTHROPIC_API_KEY:
         return {
             "yesterday": "Claude API key not configured",
@@ -155,7 +196,7 @@ def summarize(activities, extra_context: str = "") -> dict:
             "completion_tokens": 0,
         }
 
-    user_prompt = build_user_prompt(activities, extra_context=extra_context)
+    user_prompt = build_user_prompt(activities, extra_context=extra_context, target_date=target_date)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     response = request_summary_with_retries(client, user_prompt)
 
@@ -165,10 +206,11 @@ def summarize(activities, extra_context: str = "") -> dict:
         sections.get("today", ""),
         sections.get("tomorrow", ""),
         activities,
+        target_date=target_date,
     )
     today, tomorrow = enforce_local_wip_overlap(today, tomorrow, activities)
-    today = enforce_reviewed_prs_today(today, activities)
-    today, tomorrow = enforce_ready_tagged_prs_finished(today, tomorrow, activities)
+    today = enforce_reviewed_prs_today(today, activities, target_date=target_date)
+    today, tomorrow = enforce_ready_tagged_prs_finished(today, tomorrow, activities, target_date=target_date)
     tomorrow = enforce_grounded_tomorrow(tomorrow, activities)
 
     return {
@@ -299,7 +341,13 @@ def format_activity_context_line(activity) -> str:
     return f"{source}: {title}"
 
 
-def enforce_in_progress_ticket_overlap(today: str, tomorrow: str, activities) -> tuple[str, str]:
+def enforce_in_progress_ticket_overlap(today: str, tomorrow: str, activities, target_date=None) -> tuple[str, str]:
+    # Collect ticket IDs that have ready-tagged PRs — those are finished, not in-progress.
+    finished_ticket_ids = set()
+    for activity in activities:
+        if is_ready_tagged_pr(activity):
+            finished_ticket_ids.update(extract_ticket_ids(activity.title or ""))
+
     in_progress = {}
     for activity in activities:
         if (
@@ -307,6 +355,8 @@ def enforce_in_progress_ticket_overlap(today: str, tomorrow: str, activities) ->
             and activity.activity_type == "ticket_status_changed"
             and activity.ticket_id
             and "progress" in (activity.status or "").lower()
+            and is_on_target_date(activity, target_date)
+            and activity.ticket_id.upper() not in finished_ticket_ids
         ):
             existing = in_progress.get(activity.ticket_id)
             if existing is None or activity.occurred_at > existing.occurred_at:
@@ -591,11 +641,12 @@ def extract_ticket_ids(text: str) -> set[str]:
     return {match.upper() for match in re.findall(r"\b[A-Z]+-\d+\b", text, re.IGNORECASE)}
 
 
-def enforce_reviewed_prs_today(today: str, activities) -> str:
+def enforce_reviewed_prs_today(today: str, activities, target_date=None) -> str:
     reviewed = [
         a
         for a in activities
         if a.source == "github" and a.activity_type == "pr_reviewed"
+        and is_on_target_date(a, target_date)
     ]
     if not reviewed:
         return today
@@ -624,8 +675,11 @@ def enforce_reviewed_prs_today(today: str, activities) -> str:
             seen.add(dedupe_key)
             continue
 
-        ticket_prefix = f"{sorted(ticket_ids)[0]}: " if ticket_ids else ""
-        bullet = f"- Reviewed PR in {repo} — {ticket_prefix}{cleaned_title}"
+        if ticket_ids:
+            ticket_id = sorted(ticket_ids)[0]
+            bullet = f"- {ticket_id}: Reviewed PR in {repo} — {cleaned_title}"
+        else:
+            bullet = f"- Reviewed PR in {repo} — {cleaned_title}"
         lines.append(bullet)
         existing.append(bullet.lower())
         seen.add(dedupe_key)
@@ -633,8 +687,12 @@ def enforce_reviewed_prs_today(today: str, activities) -> str:
     return "\n".join(lines).strip()
 
 
-def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities) -> tuple[str, str]:
-    ready_prs = [a for a in activities if is_ready_tagged_pr(a)]
+def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities, target_date=None) -> tuple[str, str]:
+    ready_prs = [
+        a for a in activities
+        if is_ready_tagged_pr(a)
+        and is_on_target_date(a, target_date)
+    ]
     if not ready_prs:
         return today, tomorrow
 
@@ -655,8 +713,11 @@ def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities) -> 
 
         if normalized_title and normalized_title not in today_blob:
             repo = activity.repository.split("/")[-1] if activity.repository else "repo"
-            prefix = f"{sorted(ticket_ids)[0]}: " if ticket_ids else ""
-            today_lines.append(f"- Finished PR in {repo} — {prefix}{cleaned_title} ({labels})")
+            if ticket_ids:
+                ticket_id = sorted(ticket_ids)[0]
+                today_lines.append(f"- {ticket_id}: Finished PR in {repo} — {cleaned_title} ({labels})")
+            else:
+                today_lines.append(f"- Finished PR in {repo} — {cleaned_title} ({labels})")
             seen_finished.add(dedupe_key)
 
         if normalized_title:

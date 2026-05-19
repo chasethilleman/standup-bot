@@ -13,7 +13,9 @@ def format_standup(standup: Standup) -> str:
         lines.append("")
 
     if standup.tomorrow:
-        lines.append("*Tomorrow*")
+        # Friday → say "Monday" instead of "Tomorrow"
+        next_label = "*Monday*" if standup.date.weekday() == 4 else "*Tomorrow*"
+        lines.append(next_label)
         lines.append(to_slack_bullets(standup.tomorrow))
         lines.append("")
 

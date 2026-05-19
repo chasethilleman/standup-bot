@@ -226,8 +226,26 @@ class GitHubService(BaseIntegrationService):
 
         return activities
 
+    def find_ready_label_applied_at(self, pr, ready_labels: set[str]) -> datetime | None:
+        """Find when a ready label was applied using issue events."""
+        try:
+            latest = None
+            for event in pr.get_issue_events():
+                if (
+                    event.event == "labeled"
+                    and event.label
+                    and event.label.name.strip().lower() in ready_labels
+                ):
+                    if latest is None or event.created_at > latest:
+                        latest = event.created_at
+            return latest
+        except Exception:
+            logger.debug("Failed to fetch label events for PR #%s", pr.number)
+            return None
+
     def sync_ready_tagged_prs_global(self, client: Github, username: str, since: datetime, until: datetime) -> list[Activity]:
         activities = []
+        ready_label_names = {"ready to merge", "ready for review", "ready to review"}
         try:
             date_range = f"{since.date().isoformat()}..{until.date().isoformat()}"
             queries = [
@@ -252,10 +270,15 @@ class GitHubService(BaseIntegrationService):
                         labels = [label.name for label in pr.labels]
                         normalized_labels = {label.strip().lower() for label in labels}
                         ready_labels = sorted(
-                            l for l in normalized_labels if l in {"ready to merge", "ready for review", "ready to review"}
+                            l for l in normalized_labels if l in ready_label_names
                         )
                         if not ready_labels:
                             continue
+
+                        # Use when the ready label was applied, not pr.updated_at
+                        # which drifts on every comment/CI run.
+                        label_applied_at = self.find_ready_label_applied_at(pr, ready_label_names)
+                        occurred_at = label_applied_at or pr.created_at
 
                         activity = self.save_activity(
                             source="github",
@@ -267,7 +290,7 @@ class GitHubService(BaseIntegrationService):
                             repository=repo.full_name,
                             branch=pr.head.ref,
                             status="ready",
-                            occurred_at=pr.updated_at,
+                            occurred_at=occurred_at,
                             metadata={"labels": labels, "number": pr.number},
                         )
                         if activity:
