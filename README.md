@@ -98,8 +98,15 @@ uv run python manage.py standup --no-sync
 # Show raw activities without AI summary
 uv run python manage.py standup --raw
 
+# Add extra context (meeting notes, ad-hoc work, etc.)
+uv run python manage.py standup --extra "Pair-programmed with Alex on auth flow"
+uv run python manage.py standup --extra-file meeting_notes.txt
+
+# Enable debug logging
+uv run python manage.py standup --verbose
+
 # Combine flags
-uv run python manage.py standup --raw --no-sync
+uv run python manage.py standup --no-sync --raw
 ```
 
 Monday standups automatically cover Friday through Sunday.
@@ -121,7 +128,7 @@ uv run python manage.py sync --since 2026-05-10 --until 2026-05-14
 
 | Integration | What it tracks |
 |---|---|
-| **GitHub** | Commits, PRs opened/merged, PR reviews |
+| **GitHub** | Commits, PRs opened/merged, PR reviews, ready-tagged PRs |
 | **Linear** | Ticket completions, status changes |
 | **Slack** | Messages in configured channels (used as context, not quoted directly) |
 | **Local Git** | Commits (pushed and unpushed) and uncommitted changes across local repos |

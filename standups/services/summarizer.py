@@ -63,6 +63,79 @@ MAX_RETRIES = 4
 INITIAL_RETRY_DELAY_SECONDS = 1.5
 
 
+def extract_sub_bullets_from_description(description: str, max_bullets: int = 4) -> list[str]:
+    """Extract meaningful bullet points from a PR description for sub-bullet output."""
+    if not description:
+        return []
+
+    # Strip HTML comments
+    cleaned = re.sub(r"<!--.*?-->", "", description, flags=re.DOTALL)
+    # Strip HTML tags (e.g. <sup>...</sup>)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+
+    skip_phrases = [
+        "screenshot", "test plan", "how to test", "checklist",
+        "related issue", "breaking change", "n/a", "none",
+        "bugbot", "cursor", "reviewed by", "configure here",
+        "set up for automated", "risk is mainly", "medium risk",
+        "high risk", "low risk", "may affect", "could cause",
+        "could affect", "mistakes could", "risk is limited",
+        "which affects", "which may", "which could",
+    ]
+
+    bullets = []
+
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+
+        # Match markdown bullet lines (-, *, or numbered)
+        bullet_match = re.match(r"^(?:[-*]|\d+\.)\s+(.+)", stripped)
+        if bullet_match:
+            content = bullet_match.group(1).strip()
+            content = re.sub(r"^\[[ x]]\s*", "", content).strip()
+        # Match blockquote content lines (> text), skip headers/labels
+        elif stripped.startswith(">"):
+            content = re.sub(r"^>+\s*", "", stripped).strip()
+            # Skip blockquote headers, labels, and empty/short lines
+            if not content or content.startswith("**") or content.startswith("[!"):
+                continue
+        else:
+            continue
+
+        # Strip bold markers
+        content = re.sub(r"\*\*([^*]+)\*\*", r"\1", content)
+        # Strip inline code markers
+        content = re.sub(r"`([^`]+)`", r"\1", content)
+
+        if len(content) < 15:
+            continue
+
+        lower = content.lower()
+        if any(skip in lower for skip in skip_phrases):
+            continue
+
+        bullets.append(content)
+        if len(bullets) >= max_bullets:
+            break
+
+    return bullets
+
+
+def truncate_pr_description(description: str, max_length: int = 600) -> str:
+    """Clean and truncate a PR description for inclusion in the AI prompt."""
+    if not description:
+        return ""
+    # Strip HTML comments (common in PR templates)
+    cleaned = re.sub(r"<!--.*?-->", "", description, flags=re.DOTALL)
+    # Collapse excessive whitespace
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length] + "..."
+    return cleaned
+
+
 def format_activity_date(activity, target_date) -> str:
     """Return a short date tag like [May 14] for the activity's occurred_at date in local time."""
     from standups.services.generator import activity_local_date
@@ -123,7 +196,7 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
         sections.append("\n".join(lines))
 
     # GitHub PRs
-    for pr_type in ["github_pr_opened", "github_pr_merged", "github_pr_reviewed"]:
+    for pr_type in ["github_pr_opened", "github_pr_merged", "github_pr_reviewed", "github_pr_ready"]:
         prs = grouped.get(pr_type, [])
         if prs:
             label = pr_type.replace("github_", "").replace("_", " ").title()
@@ -134,6 +207,10 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
                 tag = f" [{', '.join(sorted(pr_labels))}]" if pr_labels else ""
                 date_tag = format_activity_date(a, target_date) if target_date else ""
                 lines.append(f"- {date_tag} [{repo}] {a.title}{tag} ({a.url})")
+                if a.description:
+                    truncated = truncate_pr_description(a.description, max_length=600)
+                    if truncated:
+                        lines.append(f"  Description: {truncated}")
             sections.append("\n".join(lines))
 
     # Linear tickets
@@ -687,6 +764,22 @@ def enforce_reviewed_prs_today(today: str, activities, target_date=None) -> str:
     return "\n".join(lines).strip()
 
 
+def find_ticket_group_end(lines: list[str], ticket_ids: set[str]) -> int:
+    """Find the insertion index after the last sub-bullet of an existing ticket's bullet group."""
+    lower_ids = {tid.lower() for tid in ticket_ids}
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("-"):
+            continue
+        # Check if this is a top-level bullet (no leading whitespace) matching one of our ticket IDs
+        if line.startswith("-") and any(tid in line.lower() for tid in lower_ids):
+            # Walk forward past all sub-bullets (indented lines)
+            j = i + 1
+            while j < len(lines) and not lines[j].startswith("-"):
+                j += 1
+            return j
+    return len(lines)
+
+
 def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities, target_date=None) -> tuple[str, str]:
     ready_prs = [
         a for a in activities
@@ -711,13 +804,28 @@ def enforce_ready_tagged_prs_finished(today: str, tomorrow: str, activities, tar
         ticket_ids = extract_ticket_ids(cleaned_title)
         labels = ", ".join(sorted(get_ready_labels(activity)))
 
-        if normalized_title and normalized_title not in today_blob:
+        # Check if any ticket ID from this PR already has a bullet in today
+        ticket_already_present = any(
+            tid.lower() in today_blob for tid in ticket_ids
+        ) if ticket_ids else False
+
+        sub_bullets = extract_sub_bullets_from_description(activity.description)
+
+        if ticket_already_present:
+            # Ticket already described by the AI — just note the PR status
+            insert_idx = find_ticket_group_end(today_lines, ticket_ids)
+            repo = activity.repository.split("/")[-1] if activity.repository else "repo"
+            today_lines.insert(insert_idx, f"  - Finished PR in {repo} ({labels})")
+            seen_finished.add(dedupe_key)
+        elif normalized_title and normalized_title not in today_blob:
             repo = activity.repository.split("/")[-1] if activity.repository else "repo"
             if ticket_ids:
                 ticket_id = sorted(ticket_ids)[0]
                 today_lines.append(f"- {ticket_id}: Finished PR in {repo} — {cleaned_title} ({labels})")
             else:
                 today_lines.append(f"- Finished PR in {repo} — {cleaned_title} ({labels})")
+            for sub in sub_bullets:
+                today_lines.append(f"  - {sub}")
             seen_finished.add(dedupe_key)
 
         if normalized_title:

@@ -26,6 +26,30 @@ class GitHubService(BaseIntegrationService):
     def get_client(self) -> Github:
         return Github(auth=Auth.Token(settings.GITHUB_TOKEN))
 
+    def discover_repos(self, client: Github, username: str) -> list:
+        """Discover repos from owner, member, and org memberships."""
+        user = client.get_user(username)
+        repo_objects = list(user.get_repos(type="owner", sort="pushed"))
+        repo_objects += list(user.get_repos(type="member", sort="pushed"))
+
+        try:
+            for org in user.get_orgs():
+                try:
+                    repo_objects += list(org.get_repos(type="all", sort="pushed"))
+                except Exception:
+                    logger.debug("Failed to fetch repos for org %s", org.login)
+        except Exception:
+            logger.debug("Failed to fetch orgs for %s", username)
+
+        # Deduplicate by full_name
+        seen = set()
+        unique = []
+        for repo in repo_objects:
+            if repo.full_name not in seen:
+                seen.add(repo.full_name)
+                unique.append(repo)
+        return unique
+
     def sync(self, since: datetime, until: datetime) -> list[Activity]:
         self.load_config()
         if not self.is_configured():
@@ -41,9 +65,7 @@ class GitHubService(BaseIntegrationService):
             if repos:
                 repo_objects = [client.get_repo(r) for r in repos]
             else:
-                user = client.get_user(username)
-                repo_objects = list(user.get_repos(type="owner", sort="pushed"))
-                repo_objects += list(user.get_repos(type="member", sort="pushed"))
+                repo_objects = self.discover_repos(client, username)
 
             for repo in repo_objects:
                 try:
