@@ -17,6 +17,21 @@ def extract_ticket_from_branch(branch: str) -> str:
     return match.group(1).upper() if match else ""
 
 
+def parse_source_ref(source_ref: str) -> str:
+    """Convert a git --source ref like 'refs/heads/lala/ATH-1450' to 'lala/ATH-1450'."""
+    if not source_ref:
+        return ""
+    if source_ref.startswith("refs/heads/"):
+        return source_ref[len("refs/heads/"):]
+    if source_ref.startswith("refs/remotes/"):
+        # refs/remotes/origin/lala/ATH-1450 -> lala/ATH-1450
+        parts = source_ref.split("/", 3)
+        return parts[3] if len(parts) > 3 else source_ref
+    if source_ref.startswith("refs/tags/"):
+        return source_ref[len("refs/tags/"):]
+    return source_ref
+
+
 class LocalGitService(BaseIntegrationService):
     integration_type = "local_git"
 
@@ -75,28 +90,33 @@ class LocalGitService(BaseIntegrationService):
         until_str = until.strftime("%Y-%m-%dT%H:%M:%S")
 
         author_flag = [f"--author={author}"] if author else []
+        # Use --source with %S to get the ref that led to each commit,
+        # so commits on different branches get correct attribution.
+        # Subject (%s) is last because it may contain pipe characters.
         log_output = self.run_git(repo_path, [
             "log",
             f"--since={since_str}",
             f"--until={until_str}",
             *author_flag,
-            "--format=%H|%s|%aI",
+            "--format=%H|%aI|%S|%s",
+            "--source",
             "--all",
         ])
 
         if not log_output:
             return activities
 
-        branch = self.run_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
+        fallback_branch = self.run_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
 
         for line in log_output.split("\n"):
             if not line.strip():
                 continue
-            parts = line.split("|", 2)
-            if len(parts) < 3:
+            parts = line.split("|", 3)
+            if len(parts) < 4:
                 continue
 
-            sha, message, timestamp = parts
+            sha, timestamp, source_ref, message = parts
+            branch = parse_source_ref(source_ref) or fallback_branch
 
             # Check if this commit has been pushed
             pushed = self.run_git(repo_path, [

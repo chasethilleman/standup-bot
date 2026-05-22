@@ -151,6 +151,72 @@ def is_on_target_date(activity, target_date) -> bool:
     return activity_local_date(activity.occurred_at) == target_date
 
 
+def build_work_items_section(activities, target_date=None) -> str:
+    """Build a unified section grouping local commits with their matching GitHub PRs."""
+    from integrations.services.local_git import extract_ticket_from_branch
+
+    # Collect GitHub PRs keyed by branch name
+    pr_by_branch = {}
+    for a in activities:
+        if a.source == "github" and a.activity_type in {
+            "pr_opened", "pr_merged", "pr_ready",
+        }:
+            branch = a.branch or ""
+            if branch and branch not in pr_by_branch:
+                pr_by_branch[branch] = a
+
+    # Collect local git commits keyed by branch name
+    commits_by_branch = {}
+    for a in activities:
+        if a.source == "local_git" and a.activity_type in {"commit", "local_commit"}:
+            branch = a.branch or ""
+            if branch:
+                if branch not in commits_by_branch:
+                    commits_by_branch[branch] = []
+                commits_by_branch[branch].append(a)
+
+    # Match commits to PRs by branch name
+    matched_branches = set(pr_by_branch.keys()) & set(commits_by_branch.keys())
+
+    # Also try matching by ticket_id when branches don't match directly
+    pr_by_ticket = {}
+    for branch, pr in pr_by_branch.items():
+        tid = pr.ticket_id or extract_ticket_from_branch(branch)
+        if tid:
+            pr_by_ticket.setdefault(tid.upper(), pr)
+
+    for branch, commits in list(commits_by_branch.items()):
+        if branch in matched_branches:
+            continue
+        tid = extract_ticket_from_branch(branch)
+        if tid and tid.upper() in pr_by_ticket:
+            pr = pr_by_ticket[tid.upper()]
+            matched_branches.add(pr.branch)
+            commits_by_branch.setdefault(pr.branch, []).extend(commits)
+
+    if not matched_branches:
+        return ""
+
+    lines = ["### Unified Work Items (commits matched to PRs)"]
+    for branch in sorted(matched_branches):
+        pr = pr_by_branch.get(branch)
+        if not pr:
+            continue
+        commits = commits_by_branch.get(branch, [])
+        repo = pr.repository.split("/")[-1] if pr.repository else ""
+        ticket = pr.ticket_id or extract_ticket_from_branch(branch)
+        ticket_label = f", ticket: {ticket}" if ticket else ""
+        pr_labels = get_ready_labels(pr)
+        tag = f" [{', '.join(sorted(pr_labels))}]" if pr_labels else ""
+        date_tag = format_activity_date(pr, target_date) if target_date else ""
+        lines.append(f"- {date_tag} [{repo}] PR: {pr.title}{tag} (branch: {branch}{ticket_label})")
+        for c in sorted(commits, key=lambda x: x.occurred_at):
+            c_date = format_activity_date(c, target_date) if target_date else ""
+            lines.append(f"  - {c_date} commit: {c.title}")
+
+    return "\n".join(lines)
+
+
 def build_user_prompt(activities, extra_context: str = "", target_date=None) -> str:
     grouped = {}
     for activity in activities:
@@ -212,6 +278,11 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
                     if truncated:
                         lines.append(f"  Description: {truncated}")
             sections.append("\n".join(lines))
+
+    # Unified work items: commits matched to their PRs by branch
+    work_items = build_work_items_section(activities, target_date=target_date)
+    if work_items:
+        sections.append(work_items)
 
     # Linear tickets
     for ticket_type in ["linear_ticket_completed", "linear_ticket_status_changed"]:

@@ -7,8 +7,20 @@ from github import Auth, Github
 from integrations.models import Activity
 
 from .base import BaseIntegrationService
+from .local_git import extract_ticket_from_branch
 
 logger = logging.getLogger(__name__)
+
+
+def extract_ticket_from_pr(pr) -> str:
+    """Extract ticket ID from a PR's branch name or title."""
+    import re
+
+    ticket_id = extract_ticket_from_branch(pr.head.ref) if pr.head and pr.head.ref else ""
+    if not ticket_id:
+        match = re.search(r"\b([A-Z]+-\d+)\b", pr.title or "", re.IGNORECASE)
+        ticket_id = match.group(1).upper() if match else ""
+    return ticket_id
 
 
 class GitHubService(BaseIntegrationService):
@@ -138,6 +150,7 @@ class GitHubService(BaseIntegrationService):
                             external_id=str(pr.number),
                             repository=repo.full_name,
                             branch=pr.head.ref,
+                            ticket_id=extract_ticket_from_pr(pr),
                             status="merged",
                             occurred_at=pr.merged_at,
                             metadata={"labels": labels, "number": pr.number},
@@ -154,6 +167,7 @@ class GitHubService(BaseIntegrationService):
                             external_id=str(pr.number),
                             repository=repo.full_name,
                             branch=pr.head.ref,
+                            ticket_id=extract_ticket_from_pr(pr),
                             status=pr.state,
                             occurred_at=pr.created_at,
                             metadata={"labels": labels, "number": pr.number},
@@ -175,6 +189,8 @@ class GitHubService(BaseIntegrationService):
                                 url=pr.html_url,
                                 external_id=f"{pr.number}-review-{review.id}",
                                 repository=repo.full_name,
+                                branch=pr.head.ref,
+                                ticket_id=extract_ticket_from_pr(pr),
                                 status=review.state,
                                 occurred_at=review.submitted_at,
                                 metadata={
@@ -231,6 +247,8 @@ class GitHubService(BaseIntegrationService):
                             url=pr.html_url,
                             external_id=f"{pr.number}-review-{review.id}",
                             repository=repo.full_name,
+                            branch=pr.head.ref,
+                            ticket_id=extract_ticket_from_pr(pr),
                             status=review.state,
                             occurred_at=review.submitted_at,
                             metadata={
@@ -311,6 +329,7 @@ class GitHubService(BaseIntegrationService):
                             external_id=f"{pr.number}-ready",
                             repository=repo.full_name,
                             branch=pr.head.ref,
+                            ticket_id=extract_ticket_from_pr(pr),
                             status="ready",
                             occurred_at=occurred_at,
                             metadata={"labels": labels, "number": pr.number},

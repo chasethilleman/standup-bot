@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 
 from django.core.management.base import BaseCommand
 
@@ -45,7 +45,7 @@ class Command(BaseCommand):
         if options["date"]:
             target_date = datetime.strptime(options["date"], "%Y-%m-%d").date()
         else:
-            target_date = date.today()
+            target_date = datetime.now(generator.LOCAL_TZ).date()
 
         raw_only = options["raw"]
         skip_sync = options["no_sync"]
