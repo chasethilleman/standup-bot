@@ -52,7 +52,7 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `GITHUB_TOKEN` | Personal access token with `repo` scope |
+| `GITHUB_TOKEN` | Personal access token with `repo` and `read:org` scopes |
 | `GITHUB_USERNAME` | Your GitHub username |
 | `LINEAR_API_KEY` | Personal API key from Linear Settings > API |
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-...`) |
