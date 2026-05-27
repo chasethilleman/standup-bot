@@ -39,9 +39,26 @@ class GitHubService(BaseIntegrationService):
         return Github(auth=Auth.Token(settings.GITHUB_TOKEN))
 
     def discover_repos(self, client: Github, username: str) -> list:
-        """Discover repos from owner, member, and org memberships."""
+        """Discover repos the authenticated user can access."""
+        repo_objects = []
+
+        # Use authenticated user endpoint first so collaborator/private repos
+        # across other owners are included.
+        try:
+            authed_user = client.get_user()
+            repo_objects += list(
+                authed_user.get_repos(
+                    visibility="all",
+                    affiliation="owner,collaborator,organization_member",
+                    sort="pushed",
+                )
+            )
+        except Exception:
+            logger.debug("Failed to fetch accessible repos via authenticated user endpoint")
+
+        # Fall back to explicit username lookups for compatibility.
         user = client.get_user(username)
-        repo_objects = list(user.get_repos(type="owner", sort="pushed"))
+        repo_objects += list(user.get_repos(type="owner", sort="pushed"))
         repo_objects += list(user.get_repos(type="member", sort="pushed"))
 
         try:
@@ -104,9 +121,13 @@ class GitHubService(BaseIntegrationService):
 
     def sync_commits(self, repo, username: str, since: datetime, until: datetime) -> list[Activity]:
         activities = []
+        seen_shas = set()
         try:
             commits = repo.get_commits(author=username, since=since, until=until)
             for commit in commits:
+                if commit.sha in seen_shas:
+                    continue
+                seen_shas.add(commit.sha)
                 activity = self.save_activity(
                     source="github",
                     activity_type="commit",
@@ -121,11 +142,85 @@ class GitHubService(BaseIntegrationService):
                 )
                 if activity:
                     activities.append(activity)
+
+            # GitHub's commits endpoint defaults to the repo's default branch.
+            # Collect authored commits from your active PR head branches so
+            # branch-only work is included before merge.
+            pulls = repo.get_pulls(state="all", sort="updated", direction="desc")
+            for pr in pulls:
+                if pr.updated_at < since:
+                    break
+                if not pr.user or pr.user.login != username:
+                    continue
+                if not pr.head or not pr.head.ref:
+                    continue
+
+                head_repo = pr.head.repo or repo
+                branch_ref = pr.head.ref
+
+                try:
+                    branch_commits = head_repo.get_commits(
+                        sha=branch_ref,
+                        since=since,
+                        until=until,
+                    )
+                    for commit in branch_commits:
+                        if commit.sha in seen_shas:
+                            continue
+                        seen_shas.add(commit.sha)
+                        activity = self.save_activity(
+                            source="github",
+                            activity_type="commit",
+                            title=commit.commit.message.split("\n")[0][:500],
+                            description=commit.commit.message,
+                            url=commit.html_url,
+                            external_id=commit.sha,
+                            repository=head_repo.full_name,
+                            branch=branch_ref,
+                            occurred_at=commit.commit.author.date,
+                            metadata={
+                                "additions": commit.stats.additions,
+                                "deletions": commit.stats.deletions,
+                                "from_pr_branch": True,
+                                "pr_number": pr.number,
+                            },
+                        )
+                        if activity:
+                            activities.append(activity)
+                except Exception:
+                    logger.debug(
+                        "Failed to fetch branch commits for PR #%s in %s",
+                        pr.number,
+                        repo.full_name,
+                    )
         except Exception as e:
             if "451" in str(e) or "blocked" in str(e).lower():
                 raise
             logger.exception("Failed to sync commits for %s", repo.full_name)
         return activities
+
+    def get_pr_commit_highlights(self, pr, max_highlights: int = 4) -> list[str]:
+        """Fetch concise commit message highlights for a PR."""
+        highlights = []
+        seen = set()
+        try:
+            for commit in pr.get_commits():
+                message = (commit.commit.message or "").split("\n")[0].strip()
+                if not message:
+                    continue
+                lower = message.lower()
+                if lower.startswith("merge pull request"):
+                    continue
+                key = message.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                highlights.append(message[:200])
+                if len(highlights) >= max_highlights:
+                    break
+        except Exception:
+            logger.debug("Failed to fetch commit highlights for PR #%s", pr.number)
+        return highlights
 
     def sync_pull_requests(self, repo, username: str, since: datetime, until: datetime) -> list[Activity]:
         activities = []
@@ -136,6 +231,8 @@ class GitHubService(BaseIntegrationService):
                     break
                 if pr.updated_at > until:
                     continue
+
+                pr_commit_highlights = self.get_pr_commit_highlights(pr)
 
                 # PRs authored by user
                 if pr.user.login == username:
@@ -153,7 +250,11 @@ class GitHubService(BaseIntegrationService):
                             ticket_id=extract_ticket_from_pr(pr),
                             status="merged",
                             occurred_at=pr.merged_at,
-                            metadata={"labels": labels, "number": pr.number},
+                            metadata={
+                                "labels": labels,
+                                "number": pr.number,
+                                "commit_highlights": pr_commit_highlights,
+                            },
                         )
                         if activity:
                             activities.append(activity)
@@ -170,7 +271,11 @@ class GitHubService(BaseIntegrationService):
                             ticket_id=extract_ticket_from_pr(pr),
                             status=pr.state,
                             occurred_at=pr.created_at,
-                            metadata={"labels": labels, "number": pr.number},
+                            metadata={
+                                "labels": labels,
+                                "number": pr.number,
+                                "commit_highlights": pr_commit_highlights,
+                            },
                         )
                         if activity:
                             activities.append(activity)
@@ -197,6 +302,7 @@ class GitHubService(BaseIntegrationService):
                                     "labels": labels,
                                     "number": pr.number,
                                     "review_state": review.state,
+                                    "commit_highlights": pr_commit_highlights,
                                 },
                             )
                             if activity:
@@ -229,6 +335,7 @@ class GitHubService(BaseIntegrationService):
                     repo = client.get_repo(repo_name)
                     pr = repo.get_pull(int(number_str))
                     labels = [label.name for label in pr.labels]
+                    pr_commit_highlights = self.get_pr_commit_highlights(pr)
 
                     reviews = pr.get_reviews()
                     for review in reviews:
@@ -255,6 +362,7 @@ class GitHubService(BaseIntegrationService):
                                 "labels": labels,
                                 "number": pr.number,
                                 "review_state": review.state,
+                                "commit_highlights": pr_commit_highlights,
                             },
                         )
                         if activity:
@@ -308,6 +416,7 @@ class GitHubService(BaseIntegrationService):
                         repo = client.get_repo(item.repository.full_name)
                         pr = repo.get_pull(int(item.number))
                         labels = [label.name for label in pr.labels]
+                        pr_commit_highlights = self.get_pr_commit_highlights(pr)
                         normalized_labels = {label.strip().lower() for label in labels}
                         ready_labels = sorted(
                             l for l in normalized_labels if l in ready_label_names
@@ -332,7 +441,11 @@ class GitHubService(BaseIntegrationService):
                             ticket_id=extract_ticket_from_pr(pr),
                             status="ready",
                             occurred_at=occurred_at,
-                            metadata={"labels": labels, "number": pr.number},
+                            metadata={
+                                "labels": labels,
+                                "number": pr.number,
+                                "commit_highlights": pr_commit_highlights,
+                            },
                         )
                         if activity:
                             activities.append(activity)

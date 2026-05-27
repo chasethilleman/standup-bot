@@ -52,7 +52,7 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `GITHUB_TOKEN` | Personal access token with `repo` and `read:org` scopes |
+| `GITHUB_TOKEN` | Personal access token (classic: `repo` + `read:org`, or fine-grained with read access to target repos/PRs) |
 | `GITHUB_USERNAME` | Your GitHub username |
 | `LINEAR_API_KEY` | Personal API key from Linear Settings > API |
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-...`) |
@@ -123,6 +123,26 @@ uv run python manage.py sync --source github
 # Custom date range
 uv run python manage.py sync --since 2026-05-10 --until 2026-05-14
 ```
+
+### Verify GitHub token permissions
+
+Use this when you need to confirm your token can read commits on your branches in private repos you can access.
+
+```bash
+# Check configured repos from setup_integration github
+uv run python manage.py check_github_permissions
+
+# Check specific private repos (repeat --repo)
+uv run python manage.py check_github_permissions --repo owner-one/repo-a --repo owner-two/repo-b
+
+# Expand lookback window when needed
+uv run python manage.py check_github_permissions --repo owner/repo --days 30
+```
+
+If you're using a fine-grained token, make sure it has **Repository permissions** for:
+- Contents: Read
+- Pull requests: Read
+- Metadata: Read
 
 ## Integrations
 

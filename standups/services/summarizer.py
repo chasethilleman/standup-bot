@@ -359,6 +359,14 @@ def summarize(activities, extra_context: str = "", target_date=None) -> dict:
     today, tomorrow = enforce_local_wip_overlap(today, tomorrow, activities)
     today = enforce_reviewed_prs_today(today, activities, target_date=target_date)
     today, tomorrow = enforce_ready_tagged_prs_finished(today, tomorrow, activities, target_date=target_date)
+    today, added_ticket_branch_commit_summaries = enforce_ticket_branch_commit_summaries(
+        today,
+        activities,
+        target_date=target_date,
+    )
+    today = enforce_commit_history_brief(today, activities, target_date=target_date)
+    if added_ticket_branch_commit_summaries:
+        today = strip_global_commit_history_line(today)
     tomorrow = enforce_grounded_tomorrow(tomorrow, activities)
 
     return {
@@ -368,6 +376,268 @@ def summarize(activities, extra_context: str = "", target_date=None) -> dict:
         "prompt_tokens": response.usage.input_tokens,
         "completion_tokens": response.usage.output_tokens,
     }
+
+
+def enforce_commit_history_brief(today: str, activities, target_date=None) -> str:
+    commit_activities = [
+        activity
+        for activity in activities
+        if activity.activity_type in {"commit", "local_commit"}
+        and is_on_target_date(activity, target_date)
+    ]
+    pr_commit_highlights = collect_pr_commit_highlights(activities, target_date=target_date)
+    if not commit_activities and not pr_commit_highlights:
+        return today
+
+    lines = [line for line in today.splitlines() if line.strip()]
+    normalized_lines = [line.lower() for line in lines if line.lstrip().startswith("-")]
+
+    # Avoid adding duplicate commit-history bullets if one already exists.
+    if any("commit history:" in line for line in normalized_lines):
+        return today
+
+    # Build a concise commit history snapshot.
+    total_commits = len({activity.external_id for activity in commit_activities if activity.external_id}) or len(commit_activities)
+    repos = sorted({activity.repository for activity in commit_activities if activity.repository})
+    repo_count = len(repos)
+    branch_count = len({activity.branch for activity in commit_activities if activity.branch})
+
+    raw_titles = []
+    for activity in sorted(commit_activities, key=lambda a: a.occurred_at, reverse=True):
+        raw_titles.append(activity.title or "")
+    raw_titles.extend(pr_commit_highlights)
+    commit_title_summary = summarize_commit_titles(raw_titles)
+    highlights_blob = (
+        f" Commit title summary: {join_phrases(commit_title_summary)}."
+        if commit_title_summary
+        else ""
+    )
+    if total_commits > 0:
+        bullet = (
+            f"- Commit history: {total_commits} commit(s) across {repo_count} repo(s)"
+            f" and {branch_count} branch(es).{highlights_blob}"
+        )
+    else:
+        bullet = f"- Commit history: PR commit highlights from today's activity.{highlights_blob}"
+    lines.append(bullet)
+
+    return "\n".join(lines).strip()
+
+
+def clean_commit_history_title(title: str) -> str:
+    cleaned = (title or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.split("\n")[0].strip()
+    cleaned = re.sub(r"\b[A-Z]+-\d+\b[:\s-]*", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^\W+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return ""
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def summarize_commit_titles(titles: list[str], max_items: int = 3) -> list[str]:
+    summaries = []
+    seen = set()
+
+    for title in titles:
+        normalized = normalize_commit_title_for_summary(title)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        summaries.append(normalized)
+        if len(summaries) >= max_items:
+            break
+
+    return summaries
+
+
+def normalize_commit_title_for_summary(title: str) -> str:
+    cleaned = clean_commit_history_title(title)
+    if not cleaned:
+        return ""
+
+    lowered = cleaned.lower()
+    if lowered.startswith("merge pull request"):
+        return ""
+    if lowered.startswith("revert "):
+        return ""
+
+    # Remove common conventional commit prefixes.
+    cleaned = re.sub(r"^(feat|fix|chore|docs|style|refactor|test|perf|build|ci)(\([^)]+\))?:\s*", "", cleaned, flags=re.IGNORECASE)
+    # Remove trailing PR-number references.
+    cleaned = re.sub(r"\s*\(#\d+\)\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:.")
+    if len(cleaned) < 8:
+        return ""
+
+    cleaned = simplify_commit_title(cleaned).strip()
+    if not cleaned:
+        return ""
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def collect_pr_commit_highlights(activities, target_date=None, max_highlights: int = 6) -> list[str]:
+    highlights = []
+    seen = set()
+    for activity in sorted(activities, key=lambda a: a.occurred_at, reverse=True):
+        if activity.source != "github":
+            continue
+        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_reviewed", "pr_ready"}:
+            continue
+        if not is_on_target_date(activity, target_date):
+            continue
+        metadata = getattr(activity, "metadata", {}) or {}
+        commit_highlights = metadata.get("commit_highlights", []) if isinstance(metadata, dict) else []
+        for message in commit_highlights:
+            msg = (message or "").strip()
+            if not msg:
+                continue
+            key = msg.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            highlights.append(msg)
+            if len(highlights) >= max_highlights:
+                return highlights
+    return highlights
+
+
+def enforce_ticket_branch_commit_summaries(today: str, activities, target_date=None) -> tuple[str, bool]:
+    by_ticket = collect_branch_commit_summaries_by_ticket(activities, target_date=target_date)
+    if not by_ticket:
+        return today, False
+
+    lines = [line for line in today.splitlines() if line.strip()]
+    if not lines:
+        lines = []
+    added_any = False
+
+    for ticket_id in sorted(by_ticket.keys()):
+        summary = by_ticket[ticket_id]
+        branch_label = format_branch_list(summary["branches"])
+        summary_text = join_phrases(summary["summaries"])
+        if not summary_text:
+            continue
+
+        detail_line = f"  - Branch commits ({branch_label}): {summary_text}"
+        already_has_detail = any(
+            ticket_id.lower() in line.lower() and "branch commits" in line.lower()
+            for line in lines
+        )
+        if already_has_detail:
+            continue
+
+        ticket_present = any(
+            line.startswith("-") and ticket_id.lower() in line.lower()
+            for line in lines
+        )
+        if ticket_present:
+            insert_idx = find_ticket_group_end(lines, {ticket_id})
+            lines.insert(insert_idx, detail_line)
+            added_any = True
+            continue
+
+        lines.append(f"- {ticket_id}: Progressed branch work from today's commits")
+        lines.append(detail_line)
+        added_any = True
+
+    return "\n".join(lines).strip(), added_any
+
+
+def collect_branch_commit_summaries_by_ticket(activities, target_date=None, max_summaries: int = 3) -> dict[str, dict]:
+    from integrations.services.local_git import extract_ticket_from_branch
+
+    by_ticket: dict[str, dict] = {}
+
+    def ensure_ticket(ticket_id: str):
+        key = ticket_id.upper()
+        if key not in by_ticket:
+            by_ticket[key] = {"branches": set(), "titles": []}
+        return by_ticket[key]
+
+    # First-class commit activities from local and GitHub sources.
+    for activity in sorted(activities, key=lambda a: a.occurred_at, reverse=True):
+        if activity.activity_type not in {"commit", "local_commit"}:
+            continue
+        if not is_on_target_date(activity, target_date):
+            continue
+        if not activity.branch:
+            continue
+
+        ticket_id = (
+            (activity.ticket_id or "").strip()
+            or extract_ticket_from_branch(activity.branch)
+            or (sorted(extract_ticket_ids(activity.title or ""))[0] if extract_ticket_ids(activity.title or "") else "")
+        )
+        if not ticket_id:
+            continue
+
+        bucket = ensure_ticket(ticket_id)
+        bucket["branches"].add(activity.branch)
+        if activity.title:
+            bucket["titles"].append(activity.title)
+
+    # Fallback: PR-level commit highlights when commit activities are sparse.
+    for activity in sorted(activities, key=lambda a: a.occurred_at, reverse=True):
+        if activity.source != "github":
+            continue
+        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_reviewed", "pr_ready"}:
+            continue
+        if not is_on_target_date(activity, target_date):
+            continue
+
+        ticket_id = (
+            (activity.ticket_id or "").strip()
+            or extract_ticket_from_branch(activity.branch or "")
+            or (sorted(extract_ticket_ids(activity.title or ""))[0] if extract_ticket_ids(activity.title or "") else "")
+        )
+        if not ticket_id:
+            continue
+
+        metadata = getattr(activity, "metadata", {}) or {}
+        highlights = metadata.get("commit_highlights", []) if isinstance(metadata, dict) else []
+        if not highlights:
+            continue
+
+        bucket = ensure_ticket(ticket_id)
+        if activity.branch:
+            bucket["branches"].add(activity.branch)
+        for message in highlights:
+            if message:
+                bucket["titles"].append(message)
+
+    normalized: dict[str, dict] = {}
+    for ticket_id, data in by_ticket.items():
+        summaries = summarize_commit_titles(data["titles"], max_items=max_summaries)
+        if not summaries:
+            continue
+        normalized[ticket_id] = {
+            "branches": sorted(data["branches"]),
+            "summaries": summaries,
+        }
+
+    return normalized
+
+
+def format_branch_list(branches: list[str], max_branches: int = 2) -> str:
+    cleaned = [branch for branch in branches if branch]
+    if not cleaned:
+        return "active branch"
+    if len(cleaned) <= max_branches:
+        return ", ".join(cleaned)
+    shown = ", ".join(cleaned[:max_branches])
+    return f"{shown} (+{len(cleaned) - max_branches} more)"
+
+
+def strip_global_commit_history_line(today: str) -> str:
+    lines = [line for line in today.splitlines() if line.strip()]
+    filtered = [line for line in lines if not line.lstrip().lower().startswith("- commit history:")]
+    return "\n".join(filtered).strip()
 
 
 def request_summary_with_retries(client, user_prompt):
