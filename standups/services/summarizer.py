@@ -519,14 +519,13 @@ def enforce_ticket_branch_commit_summaries(today: str, activities, target_date=N
 
     for ticket_id in sorted(by_ticket.keys()):
         summary = by_ticket[ticket_id]
-        branch_label = format_branch_list(summary["branches"])
         summary_text = join_phrases(summary["summaries"])
         if not summary_text:
             continue
 
-        detail_line = f"  - Branch commits ({branch_label}): {summary_text}"
+        detail_line = f"  - {summary_text}"
         already_has_detail = any(
-            ticket_id.lower() in line.lower() and "branch commits" in line.lower()
+            line.strip().lower() == detail_line.strip().lower()
             for line in lines
         )
         if already_has_detail:
