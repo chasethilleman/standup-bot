@@ -4,6 +4,8 @@ import re
 import subprocess
 from datetime import datetime
 
+from django.conf import settings
+
 from integrations.models import Activity
 
 from .base import BaseIntegrationService
@@ -41,8 +43,19 @@ class LocalGitService(BaseIntegrationService):
     def get_repos(self) -> list[dict]:
         return self.config.get("repos", [])
 
-    def get_author(self) -> str:
-        return self.config.get("author", "")
+    def get_author(self, repo_path: str | None = None) -> str:
+        if self.config.get("author"):
+            return self.config["author"]
+        if settings.GITHUB_USERNAME:
+            return settings.GITHUB_USERNAME
+        if repo_path:
+            email = self.run_git(repo_path, ["config", "user.email"])
+            if email:
+                return email
+            name = self.run_git(repo_path, ["config", "user.name"])
+            if name:
+                return name
+        return ""
 
     def run_git(self, repo_path: str, args: list[str]) -> str:
         result = subprocess.run(
@@ -60,7 +73,6 @@ class LocalGitService(BaseIntegrationService):
             return []
 
         activities = []
-        author = self.get_author()
 
         for repo_entry in self.get_repos():
             path = os.path.expanduser(repo_entry["path"])
@@ -70,8 +82,17 @@ class LocalGitService(BaseIntegrationService):
                 logger.warning("Not a git repo: %s", path)
                 continue
 
+            author = self.get_author(path)
+            if not author:
+                logger.warning(
+                    "Local git author not configured for %s; skipping commits. "
+                    "Set author in IntegrationConfig or GITHUB_USERNAME.",
+                    path,
+                )
+
             try:
-                activities.extend(self.sync_commits(path, name, author, since, until))
+                if author:
+                    activities.extend(self.sync_commits(path, name, author, since, until))
                 activities.extend(self.sync_uncommitted(path, name, until))
             except Exception:
                 logger.exception("Failed to sync local repo %s", path)

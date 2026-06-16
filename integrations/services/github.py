@@ -161,6 +161,7 @@ class GitHubService(BaseIntegrationService):
                 try:
                     branch_commits = head_repo.get_commits(
                         sha=branch_ref,
+                        author=username,
                         since=since,
                         until=until,
                     )
@@ -199,12 +200,20 @@ class GitHubService(BaseIntegrationService):
             logger.exception("Failed to sync commits for %s", repo.full_name)
         return activities
 
-    def get_pr_commit_highlights(self, pr, max_highlights: int = 4) -> list[str]:
-        """Fetch concise commit message highlights for a PR."""
+    def commit_authored_by_user(self, commit, username: str) -> bool:
+        author = getattr(commit, "author", None)
+        if author and getattr(author, "login", None):
+            return author.login.lower() == username.lower()
+        return False
+
+    def get_pr_commit_highlights(self, pr, username: str, max_highlights: int = 4) -> list[str]:
+        """Fetch concise commit message highlights authored by the user on a PR."""
         highlights = []
         seen = set()
         try:
             for commit in pr.get_commits():
+                if not self.commit_authored_by_user(commit, username):
+                    continue
                 message = (commit.commit.message or "").split("\n")[0].strip()
                 if not message:
                     continue
@@ -232,10 +241,9 @@ class GitHubService(BaseIntegrationService):
                 if pr.updated_at > until:
                     continue
 
-                pr_commit_highlights = self.get_pr_commit_highlights(pr)
-
                 # PRs authored by user
                 if pr.user.login == username:
+                    pr_commit_highlights = self.get_pr_commit_highlights(pr, username)
                     labels = [label.name for label in pr.labels]
                     if pr.merged and pr.merged_at and since <= pr.merged_at <= until:
                         activity = self.save_activity(
@@ -302,7 +310,6 @@ class GitHubService(BaseIntegrationService):
                                     "labels": labels,
                                     "number": pr.number,
                                     "review_state": review.state,
-                                    "commit_highlights": pr_commit_highlights,
                                 },
                             )
                             if activity:
@@ -335,7 +342,6 @@ class GitHubService(BaseIntegrationService):
                     repo = client.get_repo(repo_name)
                     pr = repo.get_pull(int(number_str))
                     labels = [label.name for label in pr.labels]
-                    pr_commit_highlights = self.get_pr_commit_highlights(pr)
 
                     reviews = pr.get_reviews()
                     for review in reviews:
@@ -362,7 +368,6 @@ class GitHubService(BaseIntegrationService):
                                 "labels": labels,
                                 "number": pr.number,
                                 "review_state": review.state,
-                                "commit_highlights": pr_commit_highlights,
                             },
                         )
                         if activity:
@@ -416,7 +421,7 @@ class GitHubService(BaseIntegrationService):
                         repo = client.get_repo(item.repository.full_name)
                         pr = repo.get_pull(int(item.number))
                         labels = [label.name for label in pr.labels]
-                        pr_commit_highlights = self.get_pr_commit_highlights(pr)
+                        pr_commit_highlights = self.get_pr_commit_highlights(pr, username)
                         normalized_labels = {label.strip().lower() for label in labels}
                         ready_labels = sorted(
                             l for l in normalized_labels if l in ready_label_names

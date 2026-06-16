@@ -18,6 +18,11 @@ is provided at the top of the activity list.
 - ONLY include work from the target date in "Today". Activities from earlier dates are provided \
 for context only — do NOT list them as today's work unless they clearly continued into the target date \
 (e.g., an in-progress ticket with commits on both days).
+- "Today" is driven primarily by code changes on the target date: commits, PRs, uncommitted work, \
+and PR reviews. Do NOT list a ticket in "Today" based only on a Linear status change or release \
+if the implementation commits/PRs happened on an earlier date.
+- Linear status updates in the prompt are secondary context — use them to enrich bullets for tickets \
+that already have target-date code activity, not as standalone Today items.
 - Group related work together (e.g., multiple commits on the same ticket/PR = one bullet)
 - When a ticket ID is available, it MUST be the first thing in the bullet point \
 (e.g., "ATH-1408: Worked on guardian dashboard" not "Worked on ATH-1408 guardian dashboard"). \
@@ -27,11 +32,12 @@ Format: "TICKET-ID: description"
 - If an item is still in progress, include the progress made under "Today" and the continuation under "Tomorrow".
 - Explicitly include PR reviews in "Today" when they occurred on the target date.
 - PRs tagged "ready for review" or "ready to merge" are finished work for "Today", not "Tomorrow".
-- Any ticket moved to "In Progress" on the target date MUST appear in both sections.
-- Tickets that were only moved to a terminal state like "Released" or "Done" (with no commits or \
-PRs in the same period) should be briefly noted as released/completed — do NOT describe the full \
-scope of work on those tickets. Group multiple released tickets into a single bullet when possible.
-- For in-progress tickets, include concrete progress details from related commits, PR activity, or uncommitted changes when available.
+- Any ticket moved to "In Progress" on the target date MUST appear in both sections only when there \
+is also target-date code activity (commits, PRs, or uncommitted changes) for that ticket.
+- Do NOT add tickets to "Today" solely because they were moved to Released, Done, or another \
+terminal Linear state on the target date. Omit release-only housekeeping unless code also landed today.
+- For in-progress tickets with target-date code activity, include concrete progress details from \
+related commits, PR activity, or uncommitted changes when available.
 - Prefer plain-English functionality summaries over file names, counts, or low-level code terminology.
 - Use the actual ticket or PR title as provided in the activity data. Do NOT rephrase, \
 paraphrase, or invent a new description for the ticket — use the original title verbatim.
@@ -151,6 +157,113 @@ def is_on_target_date(activity, target_date) -> bool:
     return activity_local_date(activity.occurred_at) == target_date
 
 
+def ticket_ids_for_activity(activity) -> set[str]:
+    ids = set()
+    if activity.ticket_id:
+        ids.add(activity.ticket_id.upper())
+    ids.update(extract_ticket_ids(activity.title or ""))
+    ids.update(extract_ticket_ids(activity.branch or ""))
+    return ids
+
+
+def is_code_change_activity(activity) -> bool:
+    if activity.source == "github" and activity.activity_type in {
+        "commit",
+        "pr_opened",
+        "pr_merged",
+        "pr_ready",
+    }:
+        return True
+    if activity.source == "local_git" and activity.activity_type in {
+        "commit",
+        "local_commit",
+        "uncommitted_changes",
+    }:
+        return True
+    return False
+
+
+def is_today_work_activity(activity) -> bool:
+    if is_code_change_activity(activity):
+        return True
+    return activity.source == "github" and activity.activity_type == "pr_reviewed"
+
+
+def allowed_today_ticket_ids(activities, target_date=None) -> set[str]:
+    """Ticket IDs with target-date code changes, WIP, or PR reviews."""
+    allowed = set()
+    for activity in activities:
+        if not is_today_work_activity(activity):
+            continue
+        if not is_on_target_date(activity, target_date):
+            continue
+        allowed.update(ticket_ids_for_activity(activity))
+    return allowed
+
+
+def filter_activities_for_summary(activities, target_date=None) -> list:
+    """Drop Linear-only status updates that lack target-date code activity."""
+    allowed = allowed_today_ticket_ids(activities, target_date)
+    filtered = []
+
+    for activity in activities:
+        if activity.source != "linear":
+            filtered.append(activity)
+            continue
+
+        if not is_on_target_date(activity, target_date):
+            continue
+
+        if ticket_ids_for_activity(activity) & allowed:
+            filtered.append(activity)
+
+    return filtered
+
+
+def parse_today_bullet_groups(today: str) -> list[tuple[str, list[str]]]:
+    groups = []
+    current_top = None
+    current_subs = []
+
+    for line in today.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("-") and not line.startswith("  "):
+            if current_top is not None:
+                groups.append((current_top, current_subs))
+            current_top = line
+            current_subs = []
+        elif current_top is not None:
+            current_subs.append(line)
+
+    if current_top is not None:
+        groups.append((current_top, current_subs))
+
+    return groups
+
+
+def render_today_bullet_groups(groups: list[tuple[str, list[str]]]) -> str:
+    lines = []
+    for top, subs in groups:
+        lines.append(top)
+        lines.extend(subs)
+    return "\n".join(lines).strip()
+
+
+def enforce_code_grounded_today(today: str, activities, target_date=None) -> str:
+    """Remove Today bullets for tickets without target-date code or review activity."""
+    allowed = allowed_today_ticket_ids(activities, target_date)
+    groups = parse_today_bullet_groups(today)
+    kept = []
+
+    for top, subs in groups:
+        ticket_ids = extract_ticket_ids(top)
+        if not ticket_ids or any(ticket_id in allowed for ticket_id in ticket_ids):
+            kept.append((top, subs))
+
+    return render_today_bullet_groups(kept)
+
+
 def build_work_items_section(activities, target_date=None) -> str:
     """Build a unified section grouping local commits with their matching GitHub PRs."""
     from integrations.services.local_git import extract_ticket_from_branch
@@ -230,6 +343,10 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
     # Header with target date context
     if target_date:
         sections.append(f"**Target standup date: {target_date.strftime('%B %-d, %Y')}**")
+        sections.append(
+            "Use target-date commits, PRs, uncommitted work, and PR reviews as the primary "
+            "source for the Today section. Linear status changes below are secondary context only."
+        )
 
     # Local git commits
     for commit_type in ["local_git_commit", "local_git_local_commit"]:
@@ -284,25 +401,30 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
     if work_items:
         sections.append(work_items)
 
-    # Linear tickets
+    # Linear tickets (only when paired with target-date code activity)
+    allowed_today = allowed_today_ticket_ids(activities, target_date)
     for ticket_type in ["linear_ticket_completed", "linear_ticket_status_changed"]:
         tickets = grouped.get(ticket_type, [])
         if tickets:
             label = "Completed" if "completed" in ticket_type else "Status Changes"
-            lines = [f"### Linear Tickets — {label}"]
+            lines = [f"### Linear Tickets — {label} (secondary context)"]
             for a in tickets:
+                if not is_on_target_date(a, target_date):
+                    continue
+                if not (ticket_ids_for_activity(a) & allowed_today):
+                    continue
                 if "completed" in ticket_type:
-                    # Show the terminal state, not the full issue description
                     state = a.status or "Done"
                     desc = f" (moved to {state})"
                 else:
                     desc = f" ({a.description})" if a.description else ""
                 date_tag = format_activity_date(a, target_date) if target_date else ""
                 lines.append(f"- {date_tag} {a.title}{desc}")
-            sections.append("\n".join(lines))
+            if len(lines) > 1:
+                sections.append("\n".join(lines))
 
     # Cross-source context by ticket
-    ticket_context = build_ticket_context_section(activities)
+    ticket_context = build_ticket_context_section(activities, target_date=target_date)
     if ticket_context:
         sections.append(ticket_context)
 
@@ -344,6 +466,7 @@ def summarize(activities, extra_context: str = "", target_date=None) -> dict:
             "completion_tokens": 0,
         }
 
+    activities = filter_activities_for_summary(activities, target_date=target_date)
     user_prompt = build_user_prompt(activities, extra_context=extra_context, target_date=target_date)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     response = request_summary_with_retries(client, user_prompt)
@@ -367,6 +490,7 @@ def summarize(activities, extra_context: str = "", target_date=None) -> dict:
     today = enforce_commit_history_brief(today, activities, target_date=target_date)
     if added_ticket_branch_commit_summaries:
         today = strip_global_commit_history_line(today)
+    today = enforce_code_grounded_today(today, activities, target_date=target_date)
     tomorrow = enforce_grounded_tomorrow(tomorrow, activities)
 
     return {
@@ -487,7 +611,7 @@ def collect_pr_commit_highlights(activities, target_date=None, max_highlights: i
     for activity in sorted(activities, key=lambda a: a.occurred_at, reverse=True):
         if activity.source != "github":
             continue
-        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_reviewed", "pr_ready"}:
+        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_ready"}:
             continue
         if not is_on_target_date(activity, target_date):
             continue
@@ -585,7 +709,7 @@ def collect_branch_commit_summaries_by_ticket(activities, target_date=None, max_
     for activity in sorted(activities, key=lambda a: a.occurred_at, reverse=True):
         if activity.source != "github":
             continue
-        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_reviewed", "pr_ready"}:
+        if activity.activity_type not in {"pr_opened", "pr_merged", "pr_ready"}:
             continue
         if not is_on_target_date(activity, target_date):
             continue
@@ -704,12 +828,13 @@ def parse_sections(text: str) -> dict:
     return sections
 
 
-def build_ticket_context_section(activities) -> str:
+def build_ticket_context_section(activities, target_date=None) -> str:
+    allowed_today = allowed_today_ticket_ids(activities, target_date)
     ticket_ids = sorted(
         {
-            a.ticket_id
-            for a in activities
-            if a.ticket_id
+            activity.ticket_id
+            for activity in activities
+            if activity.ticket_id and activity.ticket_id.upper() in allowed_today
         }
     )
     if not ticket_ids:
@@ -717,7 +842,11 @@ def build_ticket_context_section(activities) -> str:
 
     lines = ["### Cross-source Ticket Context"]
     for ticket_id in ticket_ids:
-        related = related_activities_for_ticket(ticket_id, activities)
+        related = [
+            activity
+            for activity in related_activities_for_ticket(ticket_id, activities)
+            if is_code_change_activity(activity) and is_on_target_date(activity, target_date)
+        ]
         if not related:
             continue
 
@@ -782,17 +911,25 @@ def enforce_in_progress_ticket_overlap(today: str, tomorrow: str, activities, ta
     if not in_progress:
         return today, tomorrow
 
+    allowed_today = allowed_today_ticket_ids(activities, target_date)
     today_lines = [line for line in today.splitlines() if line.strip()]
     tomorrow_lines = [line for line in tomorrow.splitlines() if line.strip()]
     today_blob = today.lower()
     tomorrow_blob = tomorrow.lower()
 
     for ticket_id, linear_activity in in_progress.items():
+        if ticket_id.upper() not in allowed_today:
+            continue
         ticket_key = ticket_id.lower()
         has_today = ticket_key in today_blob
         has_tomorrow = ticket_key in tomorrow_blob
 
-        detail = build_ticket_progress_detail(ticket_id, linear_activity, activities)
+        detail = build_ticket_progress_detail(
+            ticket_id,
+            linear_activity,
+            activities,
+            target_date=target_date,
+        )
 
         if not has_today:
             today_lines.append(f"- {detail['today']}")
@@ -802,10 +939,19 @@ def enforce_in_progress_ticket_overlap(today: str, tomorrow: str, activities, ta
     return "\n".join(today_lines).strip(), "\n".join(tomorrow_lines).strip()
 
 
-def build_ticket_progress_detail(ticket_id: str, linear_activity, activities) -> dict[str, str]:
+def build_ticket_progress_detail(
+    ticket_id: str,
+    linear_activity,
+    activities,
+    target_date=None,
+) -> dict[str, str]:
     title = (linear_activity.title or ticket_id).strip()
     transition = (linear_activity.description or "").strip()
-    related = related_activities_for_ticket(ticket_id, activities)
+    related = [
+        activity
+        for activity in related_activities_for_ticket(ticket_id, activities)
+        if is_code_change_activity(activity) and is_on_target_date(activity, target_date)
+    ]
 
     if related:
         sample = "; ".join(format_activity_context_line(a) for a in related[:2])
@@ -814,9 +960,9 @@ def build_ticket_progress_detail(ticket_id: str, linear_activity, activities) ->
         return {"today": today, "tomorrow": tomorrow}
 
     if transition:
-        today = f"{title}: Moved to In Progress and advanced the work ({transition})"
+        today = f"{title}: Moved to In Progress ({transition})"
     else:
-        today = f"{title}: Moved to In Progress and progressed this work today"
+        today = f"{title}: Moved to In Progress"
 
     tomorrow = f"Continue {title}: complete remaining in-progress tasks"
     return {"today": today, "tomorrow": tomorrow}

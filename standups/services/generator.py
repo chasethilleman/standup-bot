@@ -95,6 +95,56 @@ def get_activities(since: datetime, until: datetime) -> list[Activity]:
     )
 
 
+def assigned_ticket_ids(activities) -> set[str]:
+    return {
+        activity.ticket_id.upper()
+        for activity in activities
+        if activity.source == "linear" and activity.ticket_id
+    }
+
+
+def filter_my_work(activities: list[Activity]) -> list[Activity]:
+    """Keep only activities representing the user's own work."""
+    assigned_tickets = assigned_ticket_ids(activities)
+    if not assigned_tickets:
+        return activities
+
+    github_own_work = {
+        "commit",
+        "local_commit",
+        "pr_opened",
+        "pr_merged",
+        "pr_ready",
+    }
+    local_own_work = {"commit", "local_commit", "uncommitted_changes"}
+
+    filtered = []
+    for activity in activities:
+        if activity.source in {"linear", "slack"}:
+            filtered.append(activity)
+            continue
+
+        if activity.source == "github" and activity.activity_type == "pr_reviewed":
+            filtered.append(activity)
+            continue
+
+        ticket_id = (activity.ticket_id or "").upper()
+        if ticket_id and ticket_id in assigned_tickets:
+            filtered.append(activity)
+            continue
+
+        if activity.source == "github" and activity.activity_type in github_own_work:
+            if not ticket_id:
+                filtered.append(activity)
+            continue
+
+        if activity.source == "local_git" and activity.activity_type in local_own_work:
+            if not ticket_id:
+                filtered.append(activity)
+
+    return filtered
+
+
 def generate_standup(
     target_date: date,
     skip_sync: bool = False,
@@ -106,7 +156,7 @@ def generate_standup(
     if not skip_sync:
         sync_all(since, until)
 
-    activities = get_activities(since, until)
+    activities = filter_my_work(get_activities(since, until))
 
     if raw_only:
         return activities
