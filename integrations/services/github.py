@@ -11,6 +11,39 @@ from .local_git import extract_ticket_from_branch
 
 logger = logging.getLogger(__name__)
 
+MAX_BRANCHES_PER_REPO = 100
+
+
+def branch_tip_date(branch) -> datetime | None:
+    try:
+        commit = branch.commit.commit
+        if commit.author and commit.author.date:
+            return commit.author.date
+        if commit.committer and commit.committer.date:
+            return commit.committer.date
+    except Exception:
+        return None
+    return None
+
+
+def iter_recent_branch_names(repo, since: datetime, *, skip: set[str] | None = None):
+    """Yield non-default branch names whose tip commit falls within the sync window."""
+    skip = set(skip or set())
+    skip.add(repo.default_branch)
+
+    candidates = []
+    for branch in repo.get_branches():
+        if branch.name in skip:
+            continue
+        tip_date = branch_tip_date(branch)
+        if tip_date is None or tip_date < since:
+            continue
+        candidates.append((tip_date, branch.name))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    for _, branch_name in candidates[:MAX_BRANCHES_PER_REPO]:
+        yield branch_name
+
 
 def extract_ticket_from_pr(pr) -> str:
     """Extract ticket ID from a PR's branch name or title."""
@@ -119,81 +152,154 @@ class GitHubService(BaseIntegrationService):
 
         return activities
 
+    def record_commit(
+        self,
+        commit,
+        *,
+        repo_name: str,
+        branch: str,
+        seen_shas: set[str],
+        activities: list[Activity],
+        metadata: dict | None = None,
+    ) -> None:
+        if commit.sha in seen_shas:
+            return
+        seen_shas.add(commit.sha)
+
+        commit_metadata = {
+            "additions": commit.stats.additions,
+            "deletions": commit.stats.deletions,
+        }
+        if metadata:
+            commit_metadata.update(metadata)
+
+        activity = self.save_activity(
+            source="github",
+            activity_type="commit",
+            title=commit.commit.message.split("\n")[0][:500],
+            description=commit.commit.message,
+            url=commit.html_url,
+            external_id=commit.sha,
+            repository=repo_name,
+            branch=branch,
+            ticket_id=extract_ticket_from_branch(branch),
+            occurred_at=commit.commit.author.date,
+            metadata=commit_metadata,
+        )
+        if activity:
+            activities.append(activity)
+
+    def sync_branch_commits(
+        self,
+        repo,
+        branch_ref: str,
+        username: str,
+        since: datetime,
+        until: datetime,
+        seen_shas: set[str],
+        activities: list[Activity],
+        metadata: dict | None = None,
+    ) -> None:
+        try:
+            branch_commits = repo.get_commits(
+                sha=branch_ref,
+                author=username,
+                since=since,
+                until=until,
+            )
+            for commit in branch_commits:
+                self.record_commit(
+                    commit,
+                    repo_name=repo.full_name,
+                    branch=branch_ref,
+                    seen_shas=seen_shas,
+                    activities=activities,
+                    metadata=metadata,
+                )
+        except Exception:
+            logger.debug(
+                "Failed to fetch branch commits for %s in %s",
+                branch_ref,
+                repo.full_name,
+            )
+
+    def sync_authored_branch_commits(
+        self,
+        repo,
+        username: str,
+        since: datetime,
+        until: datetime,
+        seen_shas: set[str],
+        activities: list[Activity],
+    ) -> None:
+        """Collect authored commits from recently updated branches, with or without PRs."""
+        for branch_ref in iter_recent_branch_names(repo, since):
+            self.sync_branch_commits(
+                repo,
+                branch_ref,
+                username,
+                since,
+                until,
+                seen_shas,
+                activities,
+            )
+
+    def sync_fork_pr_branch_commits(
+        self,
+        repo,
+        username: str,
+        since: datetime,
+        until: datetime,
+        seen_shas: set[str],
+        activities: list[Activity],
+    ) -> None:
+        """Collect branch commits from fork-based PRs not visible in the main repo."""
+        pulls = repo.get_pulls(state="all", sort="updated", direction="desc")
+        for pr in pulls:
+            if pr.updated_at < since:
+                break
+            if not pr.user or pr.user.login != username:
+                continue
+            if not pr.head or not pr.head.ref:
+                continue
+
+            head_repo = pr.head.repo or repo
+            if head_repo.full_name == repo.full_name:
+                continue
+
+            self.sync_branch_commits(
+                head_repo,
+                pr.head.ref,
+                username,
+                since,
+                until,
+                seen_shas,
+                activities,
+                metadata={"from_pr_branch": True, "pr_number": pr.number},
+            )
+
     def sync_commits(self, repo, username: str, since: datetime, until: datetime) -> list[Activity]:
         activities = []
         seen_shas = set()
         try:
             commits = repo.get_commits(author=username, since=since, until=until)
             for commit in commits:
-                if commit.sha in seen_shas:
-                    continue
-                seen_shas.add(commit.sha)
-                activity = self.save_activity(
-                    source="github",
-                    activity_type="commit",
-                    title=commit.commit.message.split("\n")[0][:500],
-                    description=commit.commit.message,
-                    url=commit.html_url,
-                    external_id=commit.sha,
-                    repository=repo.full_name,
+                self.record_commit(
+                    commit,
+                    repo_name=repo.full_name,
                     branch=repo.default_branch,
-                    occurred_at=commit.commit.author.date,
-                    metadata={"additions": commit.stats.additions, "deletions": commit.stats.deletions},
+                    seen_shas=seen_shas,
+                    activities=activities,
                 )
-                if activity:
-                    activities.append(activity)
 
-            # GitHub's commits endpoint defaults to the repo's default branch.
-            # Collect authored commits from your active PR head branches so
-            # branch-only work is included before merge.
-            pulls = repo.get_pulls(state="all", sort="updated", direction="desc")
-            for pr in pulls:
-                if pr.updated_at < since:
-                    break
-                if not pr.user or pr.user.login != username:
-                    continue
-                if not pr.head or not pr.head.ref:
-                    continue
-
-                head_repo = pr.head.repo or repo
-                branch_ref = pr.head.ref
-
-                try:
-                    branch_commits = head_repo.get_commits(
-                        sha=branch_ref,
-                        author=username,
-                        since=since,
-                        until=until,
-                    )
-                    for commit in branch_commits:
-                        if commit.sha in seen_shas:
-                            continue
-                        seen_shas.add(commit.sha)
-                        activity = self.save_activity(
-                            source="github",
-                            activity_type="commit",
-                            title=commit.commit.message.split("\n")[0][:500],
-                            description=commit.commit.message,
-                            url=commit.html_url,
-                            external_id=commit.sha,
-                            repository=head_repo.full_name,
-                            branch=branch_ref,
-                            occurred_at=commit.commit.author.date,
-                            metadata={
-                                "additions": commit.stats.additions,
-                                "deletions": commit.stats.deletions,
-                                "from_pr_branch": True,
-                                "pr_number": pr.number,
-                            },
-                        )
-                        if activity:
-                            activities.append(activity)
-                except Exception:
-                    logger.debug(
-                        "Failed to fetch branch commits for PR #%s in %s",
-                        pr.number,
-                        repo.full_name,
-                    )
+            # GitHub's default commits endpoint only covers the default branch.
+            # Scan recently updated feature branches so pre-PR work is included.
+            self.sync_authored_branch_commits(
+                repo, username, since, until, seen_shas, activities
+            )
+            self.sync_fork_pr_branch_commits(
+                repo, username, since, until, seen_shas, activities
+            )
         except Exception as e:
             if "451" in str(e) or "blocked" in str(e).lower():
                 raise
