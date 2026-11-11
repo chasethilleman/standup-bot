@@ -182,3 +182,11 @@ class ExcludeSourcesTests(SimpleTestCase):
 
         self.assertEqual(result, [commit])
         self.assertEqual(sync_all.call_args.kwargs["exclude_sources"], {"claude_code"})
+
+
+class SimplifyCommitTitleTests(SimpleTestCase):
+    def test_replacements_match_whole_words_only(self):
+        self.assertEqual(
+            summarizer.simplify_commit_title("ATH-1: Fix UI bug in quiz build"),
+            "fixing user experience issue in quiz build",
+        )

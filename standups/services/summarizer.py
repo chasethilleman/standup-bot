@@ -1132,8 +1132,9 @@ def simplify_commit_title(title: str) -> str:
         ("ux", "user experience"),
         ("api", "integration"),
     ]
+    # Whole words only: a bare substring swap turns "quiz" into "quser experiencez".
     for old, new in replacements:
-        lower = lower.replace(old, new)
+        lower = re.sub(rf"\b{re.escape(old.strip())}\b", new.strip(), lower)
 
     return lower
 
