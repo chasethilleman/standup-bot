@@ -7,6 +7,7 @@ class IntegrationConfig(models.Model):
         ("github", "GitHub"),
         ("linear", "Linear"),
         ("slack", "Slack"),
+        ("claude_code", "Claude Code"),
     ]
 
     integration_type = models.CharField(max_length=20, choices=INTEGRATION_CHOICES, unique=True)
@@ -27,6 +28,7 @@ class Activity(models.Model):
         ("github", "GitHub"),
         ("linear", "Linear"),
         ("slack", "Slack"),
+        ("claude_code", "Claude Code"),
     ]
 
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES)

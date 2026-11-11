@@ -42,6 +42,13 @@ related commits, PR activity, or uncommitted changes when available.
 - Use the actual ticket or PR title as provided in the activity data. Do NOT rephrase, \
 paraphrase, or invent a new description for the ticket — use the original title verbatim.
 - Do NOT directly quote Slack messages — summarize the topics discussed instead
+- "Claude Code Sessions" are the user's AI-assisted work sessions. Use them to add work that \
+the commits, PRs, and Linear items do NOT already cover: QA follow-ups, investigations, data pulls, \
+CI debugging, automation or config changes in other tools, ticket write-ups, and planning. \
+If a session is about a ticket that already has a bullet, fold its details into that bullet as \
+sub-bullets instead of adding a new one. Describe the work done in plain English from the \
+"Outcome" lines; never quote the user's messages. Skip sessions that only asked a question, \
+looked something up, or generated this standup.
 - Use markdown bullet points (-)
 - If there are fewer than 5 major items in "Today", expand each item with indented sub-bullets \
 that describe specific features, functionalities, and changes worked on in more detail. \
@@ -185,6 +192,8 @@ def is_code_change_activity(activity) -> bool:
 
 def is_today_work_activity(activity) -> bool:
     if is_code_change_activity(activity):
+        return True
+    if activity.source == "claude_code" and activity.activity_type == "chat_session":
         return True
     return activity.source == "github" and activity.activity_type == "pr_reviewed"
 
@@ -444,6 +453,10 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
                 lines.append(f"  - {msg}")
         sections.append("\n".join(lines))
 
+    chat_section = build_chat_sessions_section(grouped.get("claude_code_chat_session", []), target_date)
+    if chat_section:
+        sections.append(chat_section)
+
     if extra_context:
         lines = ["### Additional Context (user-provided, use as supplementary info)"]
         lines.append(extra_context)
@@ -453,6 +466,24 @@ def build_user_prompt(activities, extra_context: str = "", target_date=None) -> 
         return "No activities found for this period."
 
     return "\n\n".join(sections)
+
+
+def build_chat_sessions_section(sessions, target_date=None) -> str:
+    """Claude Code sessions from the target date, newest work last."""
+    sessions = [a for a in sessions if is_on_target_date(a, target_date)]
+    if not sessions:
+        return ""
+
+    lines = ["### Claude Code Sessions (work outside commits/PRs/Linear; do not quote)"]
+    for a in sessions:
+        date_tag = format_activity_date(a, target_date) if target_date else ""
+        ticket = f"{a.ticket_id}: " if a.ticket_id and a.ticket_id.upper() not in a.title.upper() else ""
+        repo = f" [{a.repository}]" if a.repository else ""
+        lines.append(f"- {date_tag}{repo} {ticket}{a.title}")
+        for detail in (a.description or "").splitlines():
+            if detail.strip():
+                lines.append(f"  {detail}")
+    return "\n".join(lines)
 
 
 def summarize(activities, extra_context: str = "", target_date=None) -> dict:

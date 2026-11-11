@@ -36,6 +36,11 @@ class Command(BaseCommand):
             help="Path to a file containing extra context to supplement the standup.",
         )
         parser.add_argument(
+            "--no-chats",
+            action="store_true",
+            help="Leave Claude Code chat history out of this standup.",
+        )
+        parser.add_argument(
             "--verbose",
             action="store_true",
             help="Enable verbose output.",
@@ -74,6 +79,7 @@ class Command(BaseCommand):
             skip_sync=skip_sync,
             raw_only=raw_only,
             extra_context=extra_context,
+            exclude_sources={"claude_code"} if options["no_chats"] else frozenset(),
         )
 
         if raw_only:

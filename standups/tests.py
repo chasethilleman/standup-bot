@@ -128,3 +128,57 @@ class CodeGroundedTodayTests(SimpleTestCase):
         result = summarizer.enforce_code_grounded_today(today, activities, self.target_date)
 
         self.assertIn("ATH-1574", result)
+
+
+class ClaudeCodeSummaryTests(SimpleTestCase):
+    def setUp(self):
+        self.target_date = date(2026, 6, 15)
+        self.tz = ZoneInfo("America/Los_Angeles")
+        self.today_dt = datetime(2026, 6, 15, 12, 0, tzinfo=self.tz)
+        self.yesterday_dt = datetime(2026, 6, 14, 12, 0, tzinfo=self.tz)
+
+    def chat(self, ticket_id, title, occurred_at, description=""):
+        a = activity(source="claude_code", activity_type="chat_session", ticket_id=ticket_id, title=title, occurred_at=occurred_at)
+        a.description = description
+        a.repository = "delos"
+        return a
+
+    def test_chat_ticket_survives_code_grounding(self):
+        activities = [self.chat("ATH-2626", "ATH-2626 QA comments", self.today_dt)]
+        today = "- ATH-2626: Answered QA comments and moved to Product Review\n- ATH-9999: Unrelated"
+
+        result = summarizer.enforce_code_grounded_today(today, activities, self.target_date)
+
+        self.assertIn("ATH-2626", result)
+        self.assertNotIn("ATH-9999", result)
+
+    def test_chat_section_lists_target_date_sessions_only(self):
+        activities = [
+            self.chat("", "Parent CSV for announcements", self.today_dt, "Asked: pull the CSV\nOutcome: 184 rows"),
+            self.chat("ATH-1", "ATH-1 old work", self.yesterday_dt),
+        ]
+
+        prompt = summarizer.build_user_prompt(activities, target_date=self.target_date)
+
+        self.assertIn("### Claude Code Sessions", prompt)
+        self.assertIn("[delos] Parent CSV for announcements", prompt)
+        self.assertIn("  Outcome: 184 rows", prompt)
+        self.assertNotIn("ATH-1 old work", prompt)
+
+
+class ExcludeSourcesTests(SimpleTestCase):
+    def test_generate_standup_drops_excluded_sources(self):
+        from unittest.mock import patch
+
+        from standups.services import generator
+
+        chat = activity(source="claude_code", activity_type="chat_session", title="chat", occurred_at=datetime(2026, 6, 15, 12, 0, tzinfo=ZoneInfo("UTC")))
+        commit = activity(source="github", activity_type="commit", title="commit", occurred_at=chat.occurred_at)
+
+        with patch.object(generator, "get_activities", return_value=[chat, commit]), patch.object(generator, "sync_all") as sync_all:
+            result = generator.generate_standup(
+                date(2026, 6, 15), raw_only=True, exclude_sources={"claude_code"}
+            )
+
+        self.assertEqual(result, [commit])
+        self.assertEqual(sync_all.call_args.kwargs["exclude_sources"], {"claude_code"})

@@ -65,10 +65,17 @@ def activity_local_date(occurred_at: datetime) -> date:
     return occurred_at.astimezone(LOCAL_TZ).date()
 
 
-def sync_all(since: datetime, until: datetime, source: str | None = None) -> int:
+def sync_all(
+    since: datetime,
+    until: datetime,
+    source: str | None = None,
+    exclude_sources: set[str] | frozenset[str] = frozenset(),
+) -> int:
     total = 0
     for service_cls in ALL_SERVICES:
         if source and service_cls.integration_type != source:
+            continue
+        if service_cls.integration_type in exclude_sources:
             continue
 
         service = service_cls()
@@ -120,7 +127,7 @@ def filter_my_work(activities: list[Activity]) -> list[Activity]:
 
     filtered = []
     for activity in activities:
-        if activity.source in {"linear", "slack"}:
+        if activity.source in {"linear", "slack", "claude_code"}:
             filtered.append(activity)
             continue
 
@@ -150,13 +157,18 @@ def generate_standup(
     skip_sync: bool = False,
     raw_only: bool = False,
     extra_context: str = "",
+    exclude_sources: set[str] | frozenset[str] = frozenset(),
 ) -> Standup | list[Activity]:
     since, until = get_sync_range(target_date)
 
     if not skip_sync:
-        sync_all(since, until)
+        sync_all(since, until, exclude_sources=exclude_sources)
 
-    activities = filter_my_work(get_activities(since, until))
+    activities = [
+        activity
+        for activity in filter_my_work(get_activities(since, until))
+        if activity.source not in exclude_sources
+    ]
 
     if raw_only:
         return activities

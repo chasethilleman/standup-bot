@@ -74,6 +74,7 @@ Run the interactive setup wizard for each integration you want to use:
 uv run python manage.py setup_integration github
 uv run python manage.py setup_integration linear
 uv run python manage.py setup_integration slack
+uv run python manage.py setup_integration claude_code
 ```
 
 ## Usage
@@ -101,6 +102,9 @@ uv run python manage.py standup --raw
 # Add extra context (meeting notes, ad-hoc work, etc.)
 uv run python manage.py standup --extra "Pair-programmed with Alex on auth flow"
 uv run python manage.py standup --extra-file meeting_notes.txt
+
+# Leave Claude Code chat history out
+uv run python manage.py standup --no-chats
 
 # Enable debug logging
 uv run python manage.py standup --verbose
@@ -152,6 +156,7 @@ If you're using a fine-grained token, make sure it has **Repository permissions*
 | **Linear** | Ticket completions, status changes |
 | **Slack** | Messages in configured channels (used as context, not quoted directly) |
 | **Local Git** | Commits (pushed and unpushed) and uncommitted changes across local repos |
+| **Claude Code** | Your Claude Code chats (CLI and desktop app), read from local transcripts: one entry per session per day with what you asked and each turn's recap. Adds work that never reaches GitHub or Linear (QA replies, deploys, CI debugging, data pulls) and is never quoted directly |
 
 Each integration fails gracefully — if one is misconfigured or errors out, the others still work.
 
@@ -162,7 +167,7 @@ standup-bot/
 ├── standupbot/          # Django project settings
 ├── integrations/        # App: external API integrations
 │   ├── models.py        # IntegrationConfig, Activity
-│   ├── services/        # GitHub, Linear, Slack, Local Git clients
+│   ├── services/        # GitHub, Linear, Slack, Local Git, Claude Code clients
 │   └── management/commands/
 │       ├── sync.py              # Sync activities
 │       └── setup_integration.py # Interactive setup wizard
